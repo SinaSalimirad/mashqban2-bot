@@ -1,0 +1,3 @@
+# IDE-managed instruction mounts are not project files.
+.codex/
+.agents/
