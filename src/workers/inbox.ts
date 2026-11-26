@@ -103,7 +103,15 @@ export async function processOneUpdate(
       if (stored.invitationDigest && !actor) {
         const success = await redeemInvitationDigest(db, stored.invitationDigest, baleUserId, chatId);
         actor = await findActor(db, baleUserId, chatId);
-        reply = success && actor ? "عضویت شما فعال شد. /start را بفرستید." : "کد دعوت نامعتبر است یا دیگر قابل استفاده نیست.";
+        if (success && actor) {
+          const result = await handleAuthorizedMessage({ db, bale, storage, actor, userId,
+            message: { ...message, text: "/start" }, inviteCodeSecret,
+            operationId: updateOperationId(botInstanceKey, item.updateId) });
+          reply = `✅ عضویت شما فعال شد.\n\n${result.text}`;
+          if (result.buttons) buttons = await createMenuButtons(db, actor, result.buttons);
+        } else {
+          reply = "کد دعوت نامعتبر است یا دیگر قابل استفاده نیست.";
+        }
       } else if (actor) {
         const result = await handleAuthorizedMessage({ db, bale, storage, actor, userId,
           message, inviteCodeSecret, operationId: updateOperationId(botInstanceKey, item.updateId) });

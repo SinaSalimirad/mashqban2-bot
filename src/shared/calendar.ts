@@ -100,10 +100,17 @@ export function getTehranHourInstant(schoolDate: SchoolDate, hour: 0 | 14 | 22):
   return result;
 }
 
-function shiftSchoolDate(schoolDate: SchoolDate, days: number): SchoolDate {
+export function shiftSchoolDate(schoolDate: SchoolDate, days: number): SchoolDate {
   const date = new Date(`${schoolDate}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
+}
+
+export function shiftPeriodReference(schoolDate: SchoolDate, period: "week" | "month",
+  direction: -1 | 1): SchoolDate {
+  if (period === "week") return shiftSchoolDate(schoolDate, direction * 7);
+  const bounds = getPeriodBounds(getTehranHourInstant(schoolDate, 14), "month");
+  return direction === -1 ? shiftSchoolDate(bounds.start, -1) : bounds.endExclusive;
 }
 
 const persianMonth = new Intl.DateTimeFormat("en-US-u-ca-persian", {

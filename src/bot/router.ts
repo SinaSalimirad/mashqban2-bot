@@ -16,7 +16,7 @@ import { deleteHomework, saveHomework } from "../modules/homeworks/service.ts";
 import { recordFeedback } from "../modules/feedbacks/service.ts";
 import { readDailyReport, readPeriodReport, readProvisionalDailyReport } from "../modules/reports/service.ts";
 import { formatPersianSchoolDate, getTehranHourInstant, getTehranTime,
-  isHomeworkWindowOpen, parseSchoolDateInput } from "../shared/calendar.ts";
+  isHomeworkWindowOpen, parseSchoolDateInput, shiftPeriodReference, shiftSchoolDate } from "../shared/calendar.ts";
 import type { PrivateFileStorage } from "../storage/private.ts";
 
 export type RouterReply = { text: string; direct?: boolean;
@@ -37,6 +37,11 @@ function pageNumber(input: string | undefined): number | null {
 function latinDigits(input: string): string {
   return input.replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 1776))
     .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 1632));
+}
+
+function cleanInputName(input: string, maxLength: number): string | null {
+  const value = input.replace(/\s+/g, " ").trim();
+  return value && value.length <= maxLength ? value : null;
 }
 
 function navigation(base: string, page: number, itemCount: number, pageSize: number): NonNullable<RouterReply["buttons"]> {
@@ -257,10 +262,13 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       ] };
   }
   if (actor.role !== "student" && session.state === "IDLE" && text === "/reports") {
-    return { text: "گزارش موردنظر را انتخاب کنید. برای تاریخ دیگر می‌توانید فرمان را با تاریخ شمسی بفرستید.",
+    return { text: "گزارش موردنظر را انتخاب کنید.",
       buttons: [{ label: "📊 امروز", command: "/report" },
         { label: "📅 این هفته", command: "/week" },
         { label: "🗓 این ماه", command: "/month" },
+        { label: "🔎 گزارش روز دیگر", command: "/reportdate daily" },
+        { label: "🔎 هفتهٔ دیگر", command: "/reportdate week" },
+        { label: "🔎 ماه دیگر", command: "/reportdate month" },
         { label: "🏠 منوی اصلی", command: "/menu" }] };
   }
   if (actor.role !== "student" && session.state === "IDLE"
@@ -276,6 +284,64 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
         ...navigation("/homeworkmenu", page, rows.length, 8).filter((button) => button.command !== "/menu"),
         { label: "🏫 همهٔ کلاس‌ها", command: "/classes" },
         { label: "🏠 منوی اصلی", command: "/menu" }] };
+  }
+
+  if (actor.role !== "student" && session.state === "IDLE" && text.startsWith("/reportdate ")) {
+    const kind = text.slice(12).trim();
+    if (kind !== "daily" && kind !== "week" && kind !== "month") {
+      return { text: "نوع گزارش نامعتبر است." };
+    }
+    await db.update(botSessions).set({ state: "REPORT_DATE_INPUT", context: { kind },
+      revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
+    return { text: "تاریخ موردنظر را در تقویم شمسی، مانند ۱۴۰۵/۰۹/۰۵، بفرستید.",
+      buttons: [{ label: "◀️ گزارش‌ها", command: "/cancel" }] };
+  }
+  if (actor.role !== "student" && session.state === "REPORT_DATE_INPUT" && text && !text.startsWith("/")) {
+    const date = parseSchoolDateInput(text);
+    if (!date) return { text: "تاریخ معتبر نیست. نمونه: ۱۴۰۵/۰۹/۰۵",
+      buttons: [{ label: "❌ لغو", command: "/cancel" }] };
+    const context = session.context as Record<string, unknown>;
+    const kind = context.kind;
+    if (kind !== "daily" && kind !== "week" && kind !== "month") throw new Error("Invalid report date session");
+    await db.update(botSessions).set({ state: "IDLE", context: {},
+      revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
+    const command = kind === "daily" ? `/report ${date}` : `/${kind} ${date}`;
+    return handleAuthorizedMessage({ ...input, message: { ...message, text: command } });
+  }
+  if (actor.role !== "student" && session.state === "IDLE" && text.startsWith("/homeworkdate ")) {
+    const classId = text.slice(14).trim();
+    const [schoolClass] = await db.select({ id: classes.id, name: classes.name }).from(classes)
+      .where(and(eq(classes.id, classId), eq(classes.teacherId, actor.teacherId))).limit(1);
+    if (!schoolClass) return { text: "کلاس پیدا نشد." };
+    await db.update(botSessions).set({ state: "HOMEWORK_DATE_INPUT",
+      context: { classId }, revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
+    return { text: `تاریخ تکلیف‌های «${schoolClass.name}» را در تقویم شمسی بفرستید. نمونه: ۱۴۰۵/۰۹/۰۵`,
+      buttons: [{ label: "❌ لغو", command: "/cancel" }] };
+  }
+  if (actor.role !== "student" && session.state === "HOMEWORK_DATE_INPUT" && text && !text.startsWith("/")) {
+    const date = parseSchoolDateInput(text);
+    const context = session.context as Record<string, unknown>;
+    if (!date) return { text: "تاریخ معتبر نیست. نمونه: ۱۴۰۵/۰۹/۰۵",
+      buttons: [{ label: "❌ لغو", command: "/cancel" }] };
+    if (typeof context.classId !== "string") throw new Error("Invalid homework date session");
+    await db.update(botSessions).set({ state: "IDLE", context: {},
+      revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
+    return handleAuthorizedMessage({ ...input,
+      message: { ...message, text: `/homeworks ${date} ${context.classId} 1 all` } });
+  }
+  if (actor.role === "student" && session.state === "IDLE" && text === "/historydate") {
+    await db.update(botSessions).set({ state: "STUDENT_HISTORY_DATE", context: {},
+      revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
+    return { text: "تاریخ تکلیف را در تقویم شمسی بفرستید. نمونه: ۱۴۰۵/۰۹/۰۵",
+      buttons: [{ label: "❌ لغو", command: "/cancel" }] };
+  }
+  if (actor.role === "student" && session.state === "STUDENT_HISTORY_DATE" && text && !text.startsWith("/")) {
+    const date = parseSchoolDateInput(text);
+    if (!date) return { text: "تاریخ معتبر نیست. نمونه: ۱۴۰۵/۰۹/۰۵",
+      buttons: [{ label: "❌ لغو", command: "/cancel" }] };
+    await db.update(botSessions).set({ state: "IDLE", context: {},
+      revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
+    return handleAuthorizedMessage({ ...input, message: { ...message, text: `/historyon ${date}` } });
   }
 
   if (actor.role === "teacher" && session.state === "IDLE" && text === "/newclass") {
@@ -387,8 +453,76 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       buttons: [{ label: "🔑 صدور دعوت", command: `/invite student ${id}` },
         { label: "👤 جزئیات", command: `/studentinfo ${id}` }] };
   }
+  if (actor.role === "teacher" && session.state === "IDLE" && text.startsWith("/renamerequest ")) {
+    const [kind, id] = text.slice(15).trim().split(/\s+/);
+    if ((kind !== "class" && kind !== "student" && kind !== "assistant") || !id) {
+      return { text: "درخواست تغییر نام نامعتبر است." };
+    }
+    const target = kind === "class"
+      ? await db.select({ name: classes.name }).from(classes).where(and(
+        eq(classes.id, id), eq(classes.teacherId, actor.teacherId), isNull(classes.disabledAt))).limit(1)
+      : kind === "student"
+        ? await db.select({ name: sql<string>`${students.firstName} || ' ' || ${students.lastName}` }).from(students)
+          .where(and(eq(students.id, id), eq(students.teacherId, actor.teacherId), isNull(students.disabledAt))).limit(1)
+        : await db.select({ name: assistants.displayName }).from(assistants).where(and(
+          eq(assistants.id, id), eq(assistants.teacherId, actor.teacherId), isNull(assistants.disabledAt))).limit(1);
+    if (!target[0]) return { text: "پروندهٔ فعال پیدا نشد." };
+    await db.update(botSessions).set({ state: "RENAME_INPUT", context: { kind, id },
+      revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
+    return { text: kind === "student"
+      ? `نام فعلی: ${target[0].name}\nنام و نام خانوادگی جدید را با | جدا کنید؛ نمونه: علی|احمدی`
+      : `نام فعلی: ${target[0].name}\nنام جدید را بفرستید.`,
+      buttons: [{ label: "❌ لغو", command: "/cancel" }] };
+  }
+  if (actor.role === "teacher" && session.state === "RENAME_INPUT" && text && !text.startsWith("/")) {
+    const context = session.context as Record<string, unknown>;
+    if ((context.kind !== "class" && context.kind !== "student" && context.kind !== "assistant")
+      || typeof context.id !== "string") throw new Error("Invalid rename session");
+    let firstName: string | undefined;
+    let lastName: string | undefined;
+    let name: string | undefined;
+    if (context.kind === "student") {
+      const [first = "", last = "", ...extra] = text.split("|");
+      if (extra.length) return { text: "نام و نام خانوادگی را فقط با یک | جدا کنید." };
+      firstName = cleanInputName(first, 80) ?? undefined;
+      lastName = cleanInputName(last, 80) ?? undefined;
+      if (!firstName || !lastName) return { text: "نام و نام خانوادگی معتبر بفرستید؛ نمونه: علی|احمدی" };
+    } else {
+      name = cleanInputName(text, context.kind === "class" ? 80 : 120) ?? undefined;
+      if (!name) return { text: "نام خالی یا بیش از حد طولانی است." };
+    }
+    await db.update(botSessions).set({ state: "RENAME_CONFIRM",
+      context: { ...context, ...(name ? { name } : { firstName, lastName }) },
+      revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
+    const display = name ?? `${firstName} ${lastName}`;
+    return { text: `نام به «${display}» تغییر کند؟`, buttons: [
+      { label: "✅ تأیید تغییر نام", command: "/confirmrename", style: "success" },
+      { label: "❌ لغو", command: "/cancel" },
+    ] };
+  }
+  if (actor.role === "teacher" && session.state === "RENAME_CONFIRM" && text === "/confirmrename") {
+    const context = session.context as Record<string, unknown>;
+    if (typeof context.id !== "string") throw new Error("Invalid rename session");
+    if (context.kind === "class" && typeof context.name === "string") {
+      await renameClass(db, actor, context.id, context.name);
+    } else if (context.kind === "assistant" && typeof context.name === "string") {
+      await renameAssistant(db, actor, context.id, context.name);
+    } else if (context.kind === "student" && typeof context.firstName === "string"
+      && typeof context.lastName === "string") {
+      await renameStudent(db, actor, context.id, context.firstName, context.lastName);
+    } else throw new Error("Invalid rename session");
+    await db.update(botSessions).set({ state: "IDLE", context: {},
+      revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
+    const detailCommand = context.kind === "class" ? `/classinfo ${context.id}`
+      : context.kind === "student" ? `/studentinfo ${context.id}` : `/assistantinfo ${context.id}`;
+    return { text: "نام با موفقیت تغییر کرد.", buttons: [
+      { label: "◀️ بازگشت به جزئیات", command: detailCommand },
+      { label: "🏠 منوی اصلی", command: "/menu" },
+    ] };
+  }
   if (["CLASS_CREATE", "CLASS_CONFIRM", "ASSISTANT_CREATE", "ASSISTANT_CONFIRM",
-    "STUDENT_FIRST", "STUDENT_LAST", "STUDENT_CLASSES"].includes(session.state)) {
+    "STUDENT_FIRST", "STUDENT_LAST", "STUDENT_CLASSES", "RENAME_INPUT", "RENAME_CONFIRM",
+    "REPORT_DATE_INPUT", "HOMEWORK_DATE_INPUT", "STUDENT_HISTORY_DATE"].includes(session.state)) {
     return { text: "مرحلهٔ جاری را کامل کنید یا /cancel را بفرستید." };
   }
   if (actor.role !== "student" && session.state === "IDLE" && text === "/findclasses") {
@@ -402,14 +536,26 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
     return { text: "بخشی از نام یا نام خانوادگی دانش‌آموز را بفرستید.",
       buttons: [{ label: "❌ لغو", command: "/cancel" }] };
   }
+  if (actor.role === "teacher" && session.state === "IDLE" && text === "/findassistants") {
+    await db.update(botSessions).set({ state: "ASSISTANT_SEARCH", context: {},
+      revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
+    return { text: "بخشی از نام دستیار را بفرستید.",
+      buttons: [{ label: "❌ لغو", command: "/cancel" }] };
+  }
   if (actor.role !== "student" && session.state === "CLASS_SEARCH" && text && !text.startsWith("/")) {
     text = `/findclasses ${text}|1`;
   }
   if (actor.role !== "student" && session.state === "STUDENT_SEARCH" && text && !text.startsWith("/")) {
     text = `/findstudents ${text}|1`;
   }
+  if (actor.role === "teacher" && session.state === "ASSISTANT_SEARCH" && text && !text.startsWith("/")) {
+    text = `/findassistants ${text}|1`;
+  }
   if (["CLASS_SEARCH", "STUDENT_SEARCH"].includes(session.state)
     && !text.startsWith("/findclasses ") && !text.startsWith("/findstudents ")) {
+    return { text: "عبارت جست‌وجو را بفرستید یا /cancel را انتخاب کنید." };
+  }
+  if (session.state === "ASSISTANT_SEARCH" && !text.startsWith("/findassistants ")) {
     return { text: "عبارت جست‌وجو را بفرستید یا /cancel را انتخاب کنید." };
   }
   if (actor.role !== "student" && (session.state === "IDLE"
@@ -450,6 +596,30 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
         ...(page > 1 ? [{ label: "◀️ قبلی", command: `/findstudents ${term}|${page - 1}` }] : []),
         ...(rows.length === 8 ? [{ label: "بعدی ▶️", command: `/findstudents ${term}|${page + 1}` }] : []),
         { label: "👥 دانش‌آموزان", command: "/students" }] };
+  }
+  if (actor.role === "teacher" && (session.state === "IDLE"
+    || session.state === "ASSISTANT_SEARCH" && text.startsWith("/findassistants "))
+    && text.startsWith("/findassistants ")) {
+    if (session.state !== "IDLE") {
+      await db.update(botSessions).set({ state: "IDLE", context: {},
+        revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
+    }
+    const rest = text.slice(16).trim();
+    const separator = rest.lastIndexOf("|");
+    const term = (separator === -1 ? rest : rest.slice(0, separator)).trim();
+    const page = pageNumber(separator === -1 ? undefined : rest.slice(separator + 1).trim());
+    if (!term || term.length > 120 || !page) return { text: "عبارت جست‌وجو یا شمارهٔ صفحه نامعتبر است." };
+    const rows = await db.select({ id: assistants.id, displayName: assistants.displayName })
+      .from(assistants).where(and(eq(assistants.teacherId, actor.teacherId),
+        isNull(assistants.disabledAt), ilike(assistants.displayName, `%${term}%`)))
+      .orderBy(asc(assistants.displayName), asc(assistants.id)).limit(8).offset((page - 1) * 8);
+    return { text: `نتیجهٔ دستیاران برای «${term}» — صفحه ${page}\n${rows.map((row) =>
+      row.displayName).join("\n") || "موردی نیست."}`,
+      buttons: [...rows.map((row) => ({ label: `🤝 ${row.displayName.slice(0, 30)}`,
+        command: `/assistantinfo ${row.id}` })),
+        ...(page > 1 ? [{ label: "◀️ قبلی", command: `/findassistants ${term}|${page - 1}` }] : []),
+        ...(rows.length === 8 ? [{ label: "بعدی ▶️", command: `/findassistants ${term}|${page + 1}` }] : []),
+        { label: "🤝 دستیاران", command: "/assistants" }] };
   }
   const waitingForConfirmation: Record<string, string> = {
     REBIND_CONFIRM: "/confirmrebind", DEACTIVATE_CONFIRM: "/confirmdeactivate",
@@ -511,7 +681,7 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       return { text: "فرمت: /invite student شناسه یا /invite assistant شناسه" };
     }
     const code = await issueInvitation(db, actor, { kind, id }, input.inviteCodeSecret);
-    return { text: `کد دعوت شخصی: ${code}\nاین کد فقط یک‌بار معتبر است.`, direct: true };
+    return { text: `کد دعوت شخصی: ${code}\nاین کد یک‌بار و تا ۷ روز معتبر است.`, direct: true };
   }
   if (actor.role === "teacher" && text.startsWith("/rebind ")) {
     const [kind, id] = text.slice(8).trim().split(/\s+/);
@@ -519,7 +689,7 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       return { text: "فرمت: /rebind student شناسه یا /rebind assistant شناسه" };
     }
     const code = await issueInvitation(db, actor, { kind, id }, input.inviteCodeSecret, true);
-    return { text: `اتصال حساب قبلی قطع شد. کد دعوت تازه: ${code}\nاین کد فقط یک‌بار معتبر است.`, direct: true };
+    return { text: `اتصال حساب قبلی قطع شد. کد دعوت تازه: ${code}\nاین کد یک‌بار و تا ۷ روز معتبر است.`, direct: true };
   }
   if (actor.role === "teacher" && text.startsWith("/rebindrequest ")) {
     const [kind, id] = text.slice(15).trim().split(/\s+/);
@@ -544,7 +714,7 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
     const code = await issueInvitation(db, actor, { kind: context.kind, id: context.id }, input.inviteCodeSecret, true);
     await db.update(botSessions).set({ state: "IDLE", context: {},
       revision: sql`${botSessions.revision} + 1` }).where(eq(botSessions.id, session.id));
-    return { text: `اتصال حساب قبلی قطع شد. کد دعوت تازه: ${code}\nکد را فقط به شخص موردنظر بدهید.`, direct: true };
+    return { text: `اتصال حساب قبلی قطع شد. کد دعوت تازه: ${code}\nکد را فقط به شخص موردنظر بدهید؛ یک‌بار و تا ۷ روز معتبر است.`, direct: true };
   }
   if (session.state === "REBIND_CONFIRM") return { text: "برای تغییر حساب /confirmrebind و برای لغو /cancel را بفرستید." };
   if (actor.role === "teacher" && text.startsWith("/revokeinvite ")) {
@@ -553,7 +723,11 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       return { text: "فرمت: /revokeinvite student شناسه یا /revokeinvite assistant شناسه" };
     }
     await revokeInvitation(db, actor, { kind, id });
-    return { text: "کد دعوت فعال باطل شد." };
+    return { text: "کد دعوت فعال باطل شد.", buttons: [
+      { label: "◀️ بازگشت به جزئیات",
+        command: kind === "student" ? `/studentinfo ${id}` : `/assistantinfo ${id}` },
+      { label: "🏠 منوی اصلی", command: "/menu" },
+    ] };
   }
   if (actor.role === "teacher" && (text.startsWith("/join ") || text.startsWith("/leave "))) {
     const active = text.startsWith("/join ");
@@ -709,7 +883,9 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       updatedAt: new Date() }).where(eq(homeworkDrafts.id, draft.id));
     await db.update(botSessions).set({ state: "IDLE", context: {}, revision: sql`${botSessions.revision} + 1` })
       .where(eq(botSessions.id, session.id));
-    return { text: `تکلیف ذخیره شد. شناسه: ${homeworkId}`,
+    const [schoolClass] = await db.select({ name: classes.name }).from(classes)
+      .where(and(eq(classes.id, draft.classId), eq(classes.teacherId, actor.teacherId))).limit(1);
+    return { text: `✅ تکلیف ذخیره شد.\nتاریخ و زمان: ${persianTimestamp.format(new Date())}\nکلاس: ${schoolClass?.name ?? "نامشخص"}\nعنوان: ${draft.title}\nتعداد فایل‌ها: ${files.length}\nشناسه: ${homeworkId}`,
       buttons: [{ label: "👁 مشاهده تکلیف", command: `/homeworkinfo ${homeworkId}` },
         { label: "📤 ثبت تکلیف دیگر", command: "/submit" },
         { label: "🏠 منوی اصلی", command: "/menu" }] };
@@ -788,7 +964,35 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       `${formatPersianSchoolDate(getTehranHourInstant(row.schoolDate, 14))} — ${row.className} — ${row.title}\n${row.id}`).join("\n")
       }` : "تکلیفی در این صفحه نیست.",
       buttons: [...rows.map((row) => ({ label: `📚 ${row.title.slice(0, 28)}`, command: `/homeworkinfo ${row.id}` })),
-        ...navigation("/history", page, rows.length, 8)] };
+        ...navigation("/history", page, rows.length, 8).filter((button) => button.command !== "/menu"),
+        { label: "📅 انتخاب تاریخ", command: "/historydate" },
+        { label: "🏠 منوی اصلی", command: "/menu" }] };
+  }
+  if (actor.role === "student" && text.startsWith("/historyon ")) {
+    const [dateInput, pageInput] = text.slice(11).trim().split(/\s+/);
+    const schoolDate = parseSchoolDateInput(dateInput ?? "");
+    const page = pageNumber(pageInput);
+    if (!schoolDate || !page) return { text: "فرمت: /historyon ۱۴۰۵/۰۹/۰۵ [صفحه]" };
+    const rows = await db.select({ id: homeworks.id, title: homeworkVersions.title,
+      className: classes.name }).from(homeworks)
+      .innerJoin(homeworkVersions, eq(homeworks.currentVersionId, homeworkVersions.id))
+      .innerJoin(classes, eq(homeworks.classId, classes.id)).where(and(
+        eq(homeworks.studentId, actor.studentId), eq(homeworks.teacherId, actor.teacherId),
+        eq(homeworks.schoolDate, schoolDate), isNull(homeworks.deletedAt),
+      )).orderBy(asc(classes.name), asc(homeworks.createdAt), asc(homeworks.id))
+      .limit(8).offset((page - 1) * 8);
+    const previousDate = shiftSchoolDate(schoolDate, -1);
+    const nextDate = shiftSchoolDate(schoolDate, 1);
+    return { text: `${formatPersianSchoolDate(getTehranHourInstant(schoolDate, 14))} — صفحه ${page}\n${rows.map((row) =>
+      `${row.className} — ${row.title}`).join("\n") || "تکلیفی در این روز نیست."}`,
+      buttons: [...rows.map((row) => ({ label: `📚 ${row.title.slice(0, 28)}`, command: `/homeworkinfo ${row.id}` })),
+        ...(page > 1 ? [{ label: "◀️ قبلی", command: `/historyon ${schoolDate} ${page - 1}` }] : []),
+        ...(rows.length === 8 ? [{ label: "بعدی ▶️", command: `/historyon ${schoolDate} ${page + 1}` }] : []),
+        { label: "⬅️ روز قبل", command: `/historyon ${previousDate}` },
+        { label: "روز بعد ➡️", command: `/historyon ${nextDate}` },
+        { label: "📅 تاریخ دیگر", command: "/historydate" },
+        { label: "📚 همهٔ تاریخچه", command: "/history" },
+        { label: "🏠 منوی اصلی", command: "/menu" }] };
   }
   if (text.startsWith("/homeworkinfo ")) {
     const id = text.slice(14).trim();
@@ -864,7 +1068,9 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
     }
     const unavailable = files.length - available.length;
     return { text: `${available.length} فایل برای ارسال در صف قرار گرفت.${unavailable
-      ? ` ${unavailable} فایل دیگر در دسترس نیست.` : ""}` };
+      ? ` ${unavailable} فایل دیگر در دسترس نیست.` : ""}`,
+      buttons: [{ label: "◀️ بازگشت به تکلیف", command: `/homeworkinfo ${homework.id}` },
+        { label: "🏠 منوی اصلی", command: "/menu" }] };
   }
   if (actor.role !== "student" && text.startsWith("/versions ")) {
     const [homeworkId, pageInput] = text.slice(10).trim().split(/\s+/);
@@ -917,7 +1123,10 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
     return { text: `تاریخچهٔ تکلیف — صفحه ${page}\n${lines.join("\n\n")}\nبرای دریافت فایل‌ها: /files ${homework.id} شناسهٔ نسخه`,
       buttons: [...versions.slice(0, 8).filter((version) => version.kind !== "deleted")
         .map((version) => ({ label: `📎 نسخه ${version.versionNo}`, command: `/files ${homework.id} ${version.id}` })),
-        ...navigation(`/versions ${homework.id}`, page, Math.min(versions.length, 8), 8)] };
+        ...navigation(`/versions ${homework.id}`, page, Math.min(versions.length, 8), 8)
+          .filter((button) => button.command !== "/menu"),
+        { label: "◀️ بازگشت به تکلیف", command: `/homeworkinfo ${homework.id}` },
+        { label: "🏠 منوی اصلی", command: "/menu" }] };
   }
   if (text === "/confirmdelete" && session.state === "DELETE_CONFIRM") {
     const context = session.context as Record<string, unknown>;
@@ -980,13 +1189,16 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       .where(and(eq(classMemberships.teacherId, actor.teacherId),
         eq(classMemberships.classId, classId), isNull(classMemberships.leftAt)));
     const today = getTehranTime(new Date()).schoolDate;
-    return { text: `کلاس: ${schoolClass.name}\nوضعیت: ${schoolClass.disabledAt ? "آرشیوشده" : "فعال"}\nاعضای فعال: ${members?.total ?? 0}\nشناسه: ${classId}${actor.role === "teacher" ? "\nبرای تغییر نام: /renameclass شناسه نام جدید" : ""}`,
+    return { text: `کلاس: ${schoolClass.name}\nوضعیت: ${schoolClass.disabledAt ? "آرشیوشده" : "فعال"}\nاعضای فعال: ${members?.total ?? 0}\nشناسه: ${classId}`,
       buttons: [{ label: "👥 اعضا", command: `/classmembers ${classId}` },
         { label: "📥 تکلیف‌های امروز", command: `/homeworks ${today} ${classId} 1 all` },
+        { label: "📅 تکلیف‌های تاریخ دیگر", command: `/homeworkdate ${classId}` },
         { label: "📊 گزارش امروز", command: `/report ${today}` },
         ...(actor.role === "teacher" && !schoolClass.disabledAt
+          ? [{ label: "✏️ تغییر نام", command: `/renamerequest class ${classId}` }] : []),
+        ...(actor.role === "teacher" && !schoolClass.disabledAt
           ? [{ label: "🗑 غیرفعال‌سازی", command: `/deactivateclass ${classId}` }] : []),
-        { label: "◀️ کلاس‌ها", command: "/classes" }] };
+        { label: "◀️ کلاس‌ها", command: schoolClass.disabledAt ? "/classes archived" : "/classes" }] };
   }
   if (actor.role !== "student" && text.startsWith("/classmembers ")) {
     const [classId, pageInput] = text.slice(14).trim().split(/\s+/);
@@ -1006,23 +1218,32 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       `${row.firstName} ${row.lastName}: ${row.id}`).join("\n") || "عضوی در این صفحه نیست."}`,
       buttons: [...rows.map((row) => ({ label: `👤 ${row.firstName} ${row.lastName}`.slice(0, 35),
         command: `/studentinfo ${row.id}` })),
-        ...navigation(`/classmembers ${classId}`, page, rows.length, 8)] };
+        ...navigation(`/classmembers ${classId}`, page, rows.length, 8)
+          .filter((button) => button.command !== "/menu"),
+        { label: "◀️ جزئیات کلاس", command: `/classinfo ${classId}` },
+        { label: "🏠 منوی اصلی", command: "/menu" }] };
   }
   if (actor.role !== "student" && (text === "/students" || text.startsWith("/students "))) {
-    const page = pageNumber(text.slice(9).trim() || undefined);
-    if (!page) return { text: "فرمت: /students [صفحه]" };
+    const args = text.slice(9).trim().split(/\s+/).filter(Boolean);
+    const archived = args[0] === "archived";
+    const page = pageNumber(archived ? args[1] : args[0]);
+    if (!page) return { text: "فرمت: /students [archived] [صفحه]" };
     const rows = await db.select({ id: students.id, firstName: students.firstName,
       lastName: students.lastName }).from(students).where(and(
-      eq(students.teacherId, actor.teacherId), isNull(students.disabledAt),
+      eq(students.teacherId, actor.teacherId),
+      archived ? isNotNull(students.disabledAt) : isNull(students.disabledAt),
     )).orderBy(asc(students.lastName), asc(students.firstName), asc(students.id))
       .limit(8).offset((page - 1) * 8);
-    return { text: rows.length ? `دانش‌آموزان — صفحه ${page}\n${rows.map((row) =>
+    return { text: rows.length ? `دانش‌آموزان ${archived ? "غیرفعال" : "فعال"} — صفحه ${page}\n${rows.map((row) =>
       `${row.firstName} ${row.lastName}: ${row.id}`).join("\n")}` : "دانش‌آموزی در این صفحه نیست.",
       buttons: [...rows.map((row) => ({ label: `👤 ${row.firstName} ${row.lastName}`.slice(0, 35),
         command: `/studentinfo ${row.id}` })),
-        ...navigation("/students", page, rows.length, 8),
-        { label: "🔎 جست‌وجو", command: "/findstudents" },
-        ...(actor.role === "teacher" ? [{ label: "➕ دانش‌آموز جدید", command: "/newstudent" }] : [])] };
+        ...navigation(archived ? "/students archived" : "/students", page, rows.length, 8),
+        { label: archived ? "👥 دانش‌آموزان فعال" : "🗂 دانش‌آموزان غیرفعال",
+          command: archived ? "/students" : "/students archived" },
+        ...(archived ? [] : [{ label: "🔎 جست‌وجو", command: "/findstudents" }]),
+        ...(actor.role === "teacher" && !archived
+          ? [{ label: "➕ دانش‌آموز جدید", command: "/newstudent" }] : [])] };
   }
   if (actor.role !== "student" && text.startsWith("/studentinfo ")) {
     const studentId = text.slice(13).trim();
@@ -1040,15 +1261,19 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       sql`${invitations.expiresAt} > clock_timestamp()`)).limit(1);
     return { text: `${student.firstName} ${student.lastName}\nوضعیت: ${student.disabledAt ? "غیرفعال" : "فعال"}\nحساب: ${student.userId ? "متصل" : invitation ? "دعوت صادر شده" : "بدون اتصال"}\nکلاس‌ها: ${memberships.map((row) => row.name).join("، ") || "ندارد"}\nشناسه: ${student.id}`,
       buttons: [
-        ...(actor.role === "teacher" && !student.disabledAt && !student.userId
+        ...(actor.role === "teacher" && !student.disabledAt && !student.userId && !invitation
           ? [{ label: "🔑 صدور دعوت", command: `/invite student ${student.id}` }] : []),
+        ...(actor.role === "teacher" && !student.disabledAt && invitation
+          ? [{ label: "🚫 لغو دعوت فعال", command: `/revokeinvite student ${student.id}` }] : []),
         ...(actor.role === "teacher" && !student.disabledAt && student.userId
           ? [{ label: "🔄 تغییر حساب", command: `/rebindrequest student ${student.id}` }] : []),
+        ...(actor.role === "teacher" && !student.disabledAt
+          ? [{ label: "✏️ تغییر نام", command: `/renamerequest student ${student.id}` }] : []),
         ...(actor.role === "teacher" && !student.disabledAt
           ? [{ label: "🏫 مدیریت کلاس‌ها", command: `/memberships ${student.id}` }] : []),
         ...(actor.role === "teacher" && !student.disabledAt
           ? [{ label: "🗑 غیرفعال‌سازی", command: `/deactivatestudent ${student.id}` }] : []),
-        { label: "◀️ دانش‌آموزان", command: "/students" },
+        { label: "◀️ دانش‌آموزان", command: student.disabledAt ? "/students archived" : "/students" },
       ] };
   }
   if (actor.role === "teacher" && text.startsWith("/memberships ")) {
@@ -1070,14 +1295,20 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       `${selected.has(row.id) ? "✅" : "▫️"} ${row.name}`).join("\n") || "کلاسی در این صفحه نیست."}`,
       buttons: [...rows.map((row) => ({ label: `${selected.has(row.id) ? "✅ پایان" : "➕ افزودن"}: ${row.name}`.slice(0, 38),
         command: `/membershiprequest ${studentId} ${row.id} ${selected.has(row.id) ? "leave" : "join"}` })),
-        ...navigation(`/memberships ${studentId}`, page, rows.length, 8)] };
+        ...navigation(`/memberships ${studentId}`, page, rows.length, 8)
+          .filter((button) => button.command !== "/menu"),
+        { label: "◀️ جزئیات دانش‌آموز", command: `/studentinfo ${studentId}` },
+        { label: "🏠 منوی اصلی", command: "/menu" }] };
   }
   if (actor.role === "teacher" && (text === "/assistants" || text.startsWith("/assistants "))) {
-    const page = pageNumber(text.slice(12).trim() || undefined);
-    if (!page) return { text: "فرمت: /assistants [صفحه]" };
+    const args = text.slice(12).trim().split(/\s+/).filter(Boolean);
+    const archived = args[0] === "archived";
+    const page = pageNumber(archived ? args[1] : args[0]);
+    if (!page) return { text: "فرمت: /assistants [archived] [صفحه]" };
     const rows = await db.select({ id: assistants.id, displayName: assistants.displayName,
       userId: assistants.userId }).from(assistants).where(and(
-      eq(assistants.teacherId, actor.teacherId), isNull(assistants.disabledAt),
+      eq(assistants.teacherId, actor.teacherId),
+      archived ? isNotNull(assistants.disabledAt) : isNull(assistants.disabledAt),
     )).orderBy(asc(assistants.displayName), asc(assistants.id))
       .limit(8).offset((page - 1) * 8);
     return { text: rows.length ? rows.map((row) =>
@@ -1085,22 +1316,34 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       : "دستیاری در این صفحه نیست.",
       buttons: [...rows.map((row) => ({ label: `🤝 ${row.displayName.slice(0, 30)}`,
         command: `/assistantinfo ${row.id}` })),
-        ...navigation("/assistants", page, rows.length, 8),
-        { label: "➕ دستیار جدید", command: "/newassistant" }] };
+        ...navigation(archived ? "/assistants archived" : "/assistants", page, rows.length, 8),
+        { label: archived ? "🤝 دستیاران فعال" : "🗂 دستیاران غیرفعال",
+          command: archived ? "/assistants" : "/assistants archived" },
+        ...(archived ? [] : [{ label: "🔎 جست‌وجو", command: "/findassistants" },
+          { label: "➕ دستیار جدید", command: "/newassistant" }])] };
   }
   if (actor.role === "teacher" && text.startsWith("/assistantinfo ")) {
     const id = text.slice(15).trim();
     const [assistant] = await db.select().from(assistants)
       .where(and(eq(assistants.id, id), eq(assistants.teacherId, actor.teacherId))).limit(1);
     if (!assistant) return { text: "دستیار پیدا نشد." };
+    const [invitation] = await db.select({ id: invitations.id }).from(invitations).where(and(
+      eq(invitations.teacherId, actor.teacherId), eq(invitations.assistantId, assistant.id),
+      isNull(invitations.consumedAt), isNull(invitations.revokedAt),
+      sql`${invitations.expiresAt} > clock_timestamp()`)).limit(1);
     return { text: `${assistant.displayName}\nوضعیت: ${assistant.disabledAt ? "غیرفعال" : "فعال"}\nحساب: ${assistant.userId ? "متصل" : "بدون اتصال"}\nشناسه: ${id}`,
       buttons: [
-        ...(!assistant.disabledAt && !assistant.userId ? [{ label: "🔑 صدور دعوت", command: `/invite assistant ${id}` }] : []),
+        ...(!assistant.disabledAt && !assistant.userId && !invitation
+          ? [{ label: "🔑 صدور دعوت", command: `/invite assistant ${id}` }] : []),
+        ...(!assistant.disabledAt && invitation
+          ? [{ label: "🚫 لغو دعوت فعال", command: `/revokeinvite assistant ${id}` }] : []),
         ...(!assistant.disabledAt && assistant.userId
           ? [{ label: "🔄 تغییر حساب", command: `/rebindrequest assistant ${id}` }] : []),
         ...(!assistant.disabledAt
+          ? [{ label: "✏️ تغییر نام", command: `/renamerequest assistant ${id}` }] : []),
+        ...(!assistant.disabledAt
           ? [{ label: "🗑 غیرفعال‌سازی", command: `/deactivateassistant ${id}` }] : []),
-        { label: "◀️ دستیاران", command: "/assistants" },
+        { label: "◀️ دستیاران", command: assistant.disabledAt ? "/assistants archived" : "/assistants" },
       ] };
   }
   if (actor.role !== "student" && text.startsWith("/homeworks ")) {
@@ -1111,6 +1354,8 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
     if (!schoolDate || !classId || !page || !["active", "deleted", "all"].includes(filter)) {
       return { text: "فرمت: /homeworks ۱۴۰۵/۰۹/۰۵ شناسه کلاس [صفحه] [active|deleted|all]" };
     }
+    const previousDate = shiftSchoolDate(schoolDate, -1);
+    const nextDate = shiftSchoolDate(schoolDate, 1);
     const rows = await db.select({ id: homeworks.id, versionId: homeworkVersions.id,
       title: homeworkVersions.title, firstName: students.firstName, lastName: students.lastName,
       deletedAt: homeworks.deletedAt })
@@ -1127,8 +1372,15 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       }` : "تکلیفی در این صفحه نیست.",
       buttons: [...rows.map((row) => ({ label: `📚 ${row.firstName} ${row.lastName}: ${row.title}`.slice(0, 40),
         command: `/homeworkinfo ${row.id}` })),
+        { label: "✅ فعال", command: `/homeworks ${schoolDate} ${classId} 1 active` },
+        { label: "🗑 حذف‌شده", command: `/homeworks ${schoolDate} ${classId} 1 deleted` },
+        { label: "👥 همه", command: `/homeworks ${schoolDate} ${classId} 1 all` },
         ...(page > 1 ? [{ label: "◀️ قبلی", command: `/homeworks ${schoolDate} ${classId} ${page - 1} ${filter}` }] : []),
         ...(rows.length === 8 ? [{ label: "بعدی ▶️", command: `/homeworks ${schoolDate} ${classId} ${page + 1} ${filter}` }] : []),
+        { label: "⬅️ روز قبل", command: `/homeworks ${previousDate} ${classId} 1 ${filter}` },
+        { label: "روز بعد ➡️", command: `/homeworks ${nextDate} ${classId} 1 ${filter}` },
+        { label: "📅 تاریخ دیگر", command: `/homeworkdate ${classId}` },
+        { label: "◀️ جزئیات کلاس", command: `/classinfo ${classId}` },
         { label: "🏠 منوی اصلی", command: "/menu" },
       ] };
   }
@@ -1163,7 +1415,9 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
     return { text: `بازخوردها — صفحه ${page}\n${lines.join("\n\n")}`,
       buttons: [...rows.filter((row) => row.kind === "voice")
         .map((row) => ({ label: `🎙 ${row.title.slice(0, 26)}`, command: `/feedbackfile ${row.id}` })),
-        ...navigation(base, page, rows.length, 8)] };
+        ...navigation(base, page, rows.length, 8).filter((button) => button.command !== "/menu"),
+        ...(homeworkId ? [{ label: "◀️ بازگشت به تکلیف", command: `/homeworkinfo ${homeworkId}` }] : []),
+        { label: "🏠 منوی اصلی", command: "/menu" }] };
   }
   if (text.startsWith("/feedbackfile ")) {
     const feedbackId = text.slice(14).trim();
@@ -1310,6 +1564,8 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       return `${String(summary.name)}: تحویل‌داده ${submitted}، تحویل‌نداده ${missing} (${percent})`;
     });
     const displayDate = formatPersianSchoolDate(getTehranHourInstant(date, 14));
+    const previousDate = shiftSchoolDate(date, -1);
+    const nextDate = shiftSchoolDate(date, 1);
     const allEntries = (final?.entries ?? provisional?.entries ?? []).filter((entry) =>
       filter === "all" || entry.submitted === (filter === "submitted"));
     const entries = allEntries.slice((page - 1) * 8, page * 8).map((entry) =>
@@ -1320,6 +1576,9 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
         { label: "👥 همه", command: `/report ${date} 1 all` },
         ...(page > 1 ? [{ label: "◀️ قبلی", command: `/report ${date} ${page - 1} ${filter}` }] : []),
         ...(allEntries.length > page * 8 ? [{ label: "بعدی ▶️", command: `/report ${date} ${page + 1} ${filter}` }] : []),
+        { label: "⬅️ روز قبل", command: `/report ${previousDate}` },
+        { label: "روز بعد ➡️", command: `/report ${nextDate}` },
+        { label: "📅 تاریخ دیگر", command: "/reportdate daily" },
         { label: "📊 گزارش‌ها", command: "/reports" }] };
   }
   if (actor.role !== "student" && (text.startsWith("/week ") || text.startsWith("/month "))) {
@@ -1330,6 +1589,8 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
     if (!date || !page) return { text: "فرمت: /week ۱۴۰۵/۰۹/۰۵ [صفحه] یا /month ۱۴۰۵/۰۹/۰۵ [صفحه]" };
     const reference = getTehranHourInstant(date, 14);
     const result = await readPeriodReport(db, actor, reference, period);
+    const previousReference = shiftPeriodReference(date, period, -1);
+    const nextReference = shiftPeriodReference(date, period, 1);
     const lastDate = new Date(Date.parse(`${result.endExclusive}T00:00:00.000Z`) - 86_400_000)
       .toISOString().slice(0, 10);
     const today = getTehranTime(new Date()).schoolDate;
@@ -1348,6 +1609,11 @@ export async function handleAuthorizedMessage(input: RouterContext): Promise<Rou
       buttons: [
         ...(page > 1 ? [{ label: "◀️ قبلی", command: `/${period} ${date} ${page - 1}` }] : []),
         ...(result.rows.length > page * 20 ? [{ label: "بعدی ▶️", command: `/${period} ${date} ${page + 1}` }] : []),
+        { label: period === "week" ? "⬅️ هفتهٔ قبل" : "⬅️ ماه قبل",
+          command: `/${period} ${previousReference}` },
+        { label: period === "week" ? "هفتهٔ بعد ➡️" : "ماه بعد ➡️",
+          command: `/${period} ${nextReference}` },
+        { label: "📅 انتخاب تاریخ", command: `/reportdate ${period}` },
         ...(provisional ? [{ label: "📊 گزارش موقت امروز", command: `/report ${today}` }] : []),
         { label: "📊 گزارش‌ها", command: "/reports" },
       ] };

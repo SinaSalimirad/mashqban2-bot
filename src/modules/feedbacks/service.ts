@@ -73,7 +73,7 @@ export async function recordFeedback(db: Database, actor: Actor, input: Feedback
     await tx.insert(outboxMessages).values({
       teacherId: actor.teacherId, feedbackId: feedback.id, targetStudentId: student.id,
       kind: "feedback_text", idempotencyKey: `feedback:${feedback.id}:text`,
-      payload: { text: body ? `${heading}\n${body}` : heading },
+      payload: { text: body ? `${heading}\n${body}` : heading, homeworkId: homework.id },
     });
     if (input.content.kind === "voice") {
       await tx.insert(outboxMessages).values({

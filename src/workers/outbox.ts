@@ -3,6 +3,8 @@ import type { Database } from "../database/client.ts";
 import { assistants, fileAssets, homeworks, homeworkVersionFiles, homeworkVersions,
   outboxMessages, students, teachers, users } from "../database/schema.ts";
 import { BaleApiError, type BaleButton, type BaleClient } from "../bot/bale/client.ts";
+import { createMenuButtons } from "../bot/callbacks.ts";
+import { findActor } from "../modules/auth/service.ts";
 import type { PrivateFileStorage } from "../storage/private.ts";
 import { formatPersianSchoolDate, getTehranHourInstant } from "../shared/calendar.ts";
 
@@ -20,7 +22,7 @@ function reportText(payload: unknown): string {
     return `${item.name}: تحویل‌داده ${digits.format(item.submitted)}، تحویل‌نداده ${digits.format(item.missing)}`;
   });
   const date = formatPersianSchoolDate(getTehranHourInstant(record.schoolDate, 14));
-  return `گزارش روزانه ${date}\n${lines.join("\n")}`;
+  return `🔒 بازهٔ ثبت تکلیف امروز بسته شد.\n📊 گزارش نهایی ${date}\n${lines.join("\n")}`;
 }
 
 function textPayload(payload: unknown): string {
@@ -163,9 +165,33 @@ export async function dispatchOneOutbox(db: Database, bale: BaleClient, storage:
       providerMessageId = await bale.sendVoice(chatId, await storage.read(item.teacherId, asset.storageKey));
     } else {
       const text = item.kind === "daily_report" ? reportText(item.payload) : textPayload(item.payload);
-      const buttons = item.kind === "bot_reply" ? replyButtons(item.payload) : undefined;
+      let buttons = item.kind === "bot_reply" ? replyButtons(item.payload) : undefined;
       const payload = typeof item.payload === "object" && item.payload !== null && !Array.isArray(item.payload)
         ? item.payload as Record<string, unknown> : {};
+      if (item.kind === "daily_report" && item.recipientUserId && typeof payload.schoolDate === "string") {
+        const [recipient] = await db.select({ baleUserId: users.baleUserId,
+          privateChatId: users.privateChatId }).from(users)
+          .where(eq(users.id, item.recipientUserId)).limit(1);
+        if (recipient?.privateChatId) {
+          const actor = await findActor(db, String(recipient.baleUserId), String(recipient.privateChatId));
+          if (actor) buttons = await createMenuButtons(db, actor, [
+            { label: "📊 مشاهدهٔ گزارش کامل", command: `/report ${payload.schoolDate}`, style: "primary" },
+          ]);
+        }
+      }
+      if (item.kind === "feedback_text" && item.targetStudentId && typeof payload.homeworkId === "string") {
+        const [recipient] = await db.select({ baleUserId: users.baleUserId,
+          privateChatId: users.privateChatId }).from(students)
+          .innerJoin(users, eq(students.userId, users.id)).where(and(
+            eq(students.id, item.targetStudentId), isNull(students.disabledAt))).limit(1);
+        if (recipient?.privateChatId) {
+          const actor = await findActor(db, String(recipient.baleUserId), String(recipient.privateChatId));
+          if (actor?.role === "student") buttons = await createMenuButtons(db, actor, [
+            { label: "📚 مشاهدهٔ تکلیف", command: `/homeworkinfo ${payload.homeworkId}`, style: "primary" },
+            { label: "💬 همهٔ بازخوردها", command: "/feedbacks" },
+          ]);
+        }
+      }
       const editMessageId = payload.editMessageId;
       if (item.kind === "bot_reply" && typeof editMessageId === "number"
         && Number.isSafeInteger(editMessageId) && editMessageId > 0) {

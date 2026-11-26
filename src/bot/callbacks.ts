@@ -19,8 +19,14 @@ export async function invalidateMenuButtons(db: Database, actor: Actor): Promise
 export async function createMenuButtons(db: Database, actor: Actor,
   buttons: NonNullable<RouterReply["buttons"]>) {
   return db.transaction(async (tx) => {
+    const now = new Date();
+    await tx.insert(botSessions).values({
+      userId: actor.userId, chatId: BigInt(actor.chatId), teacherId: actor.teacherId,
+      role: actor.role, expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+    }).onConflictDoUpdate({ target: [botSessions.userId, botSessions.chatId],
+      set: { teacherId: actor.teacherId, role: actor.role, updatedAt: now } });
     const [session] = await tx.update(botSessions).set({
-      revision: sql`${botSessions.revision} + 1`, updatedAt: new Date(),
+      revision: sql`${botSessions.revision} + 1`, updatedAt: now,
     }).where(and(eq(botSessions.userId, actor.userId),
       eq(botSessions.chatId, BigInt(actor.chatId)))).returning({ revision: botSessions.revision });
     if (!session) throw new Error("Session unavailable");
