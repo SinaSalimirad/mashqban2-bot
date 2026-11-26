@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+private-files
+coverage
+tests
+skills
+docs
+README.md
+compose.yaml

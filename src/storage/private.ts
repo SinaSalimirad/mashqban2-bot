@@ -61,4 +61,14 @@ export class PrivateFileStorage {
   async read(ownerId: string, storageKey: string): Promise<Uint8Array> {
     return readFile(this.path(ownerId, storageKey));
   }
+
+  async remove(ownerId: string, storageKey: string): Promise<void> {
+    try {
+      await unlink(this.path(ownerId, storageKey));
+    } catch (error) {
+      if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
 }

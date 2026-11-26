@@ -1,4 +1,4 @@
-# Local development database only. Use a separate deployment configuration in production.
+# The published HTTP port is local only. Add TLS at the deployment edge before remote access.
 services:
   db:
     image: postgres:17.12
@@ -7,7 +7,7 @@ services:
       POSTGRES_DB: mashqban
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -16,5 +16,50 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    build: .
+    command: ["bun", "run", "src/container.ts", "migrate"]
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      BALE_BOT_TOKEN: ${BALE_BOT_TOKEN:?Set BALE_BOT_TOKEN in .env}
+      TEACHER_BALE_ID: ${TEACHER_BALE_ID:?Set TEACHER_BALE_ID in .env}
+      BOT_INSTANCE_KEY: ${BOT_INSTANCE_KEY:-mashqban-primary}
+      INVITE_CODE_SECRET: ${INVITE_CODE_SECRET:?Set INVITE_CODE_SECRET in .env}
+      FILE_STORAGE_DIR: /var/lib/mashqban/files
+      HEALTH_PORT: "3000"
+    volumes:
+      - private_files:/var/lib/mashqban/files
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:3000/ready'); if (!r.ok) process.exit(1)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+
+  nginx:
+    image: nginx:1.30.6-trixie
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-8080}:8080"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  private_files:

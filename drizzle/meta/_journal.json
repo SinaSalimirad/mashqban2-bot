@@ -15,6 +15,13 @@
       "when": 1795634144741,
       "tag": "0001_wakeful_lilandra",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795662652315,
+      "tag": "0002_purple_machine_man",
+      "breakpoints": true
     }
   ]
 }

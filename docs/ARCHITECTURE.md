@@ -14,7 +14,7 @@ This document is intended for the developer and Codex; it does not imply that co
 | Packaging | Agreed | Docker + Docker Compose |
 | Architecture | MVP proposal | Modular monolith, one application service and one DB |
 | HTTP framework | Conditional | ElysiaJS if Webhooks or HTTP endpoints are needed; native Bun is also an option |
-| Reverse proxy | Conditional | Nginx for HTTPS/Webhooks if needed |
+| Reverse proxy | Owner request | Nginx in front of the backend health endpoints; polling remains the bot transport |
 | Update delivery | Initial choice | Long Polling for a single instance; test-bot verification pending |
 | File storage | Owner decision | Private server storage for homework and feedback files |
 | API client | MVP proposal | Lightweight custom fetch adapter; do not assume full Telegram compatibility |
@@ -190,7 +190,7 @@ Multi-file/version workflows use an operation ID independent of update ID; doubl
 
 **Owner decision (2026-11-25):** Store homework and feedback files in private server storage. Bale File IDs may be retained as provider references, but are not the durability source. Define backup, retention, upload limits, and recovery before release.
 
-The owner specified retention until one year after 31 Shahrivar at the end of the relevant school year. Implement deletion only after identifying all references, backing up according to the final policy, and confirming that historical versions and feedback no longer need the asset.
+The owner specified retention until one year after 31 Shahrivar at the end of the relevant school year. `src/workers/retention.ts` calculates the cutoff, checks homework/version/feedback and open-draft references, removes eligible private bytes, and marks the asset `purged`. Operators must set up and verify backups before real student data is collected.
 
 | Option | Benefit | Risk/condition |
 |---|---|---|
@@ -251,7 +251,7 @@ LOG_LEVEL=info
 
 - `app`: verified/pinned Bun version, dependency lockfile, reproducible build, non-root execution where possible, graceful shutdown. Expose only necessary HTTP-mode ports.
 - `db`: pinned PostgreSQL, durable volume, healthcheck, internal network; no public production DB port.
-- `nginx` only for Webhooks: TLS/certificate renewal, proxy necessary endpoints only, API-appropriate rate/body limits. Polling needs no public port.
+- `nginx` is included at the owner's request. With polling it exposes only `/health` and `/ready` on a localhost-bound host port; no public application API is exposed. Configure TLS at the deployment edge before allowing remote access. If transport changes to Webhook, review source authentication and request limits first.
 - Define file/secret/backend volumes after the storage decision; do not keep persistent data in ephemeral container layers.
 - Run migrations once per release before app startup with backup/rollback plans. No production `drizzle-kit push` or automatic schema resets. Commit lockfiles and migrations.
 - Health/readiness through HTTP where applicable or an internal command. Readiness checks DB connectivity/schema compatibility, not repeated Bale API calls. Configure restart policy and SIGTERM handling: stop new claims, finish current transactions, release leases or recover after expiry.
@@ -305,4 +305,4 @@ For each phase: small reviewable changes, relevant tests, typecheck, and recorde
 
 The MVP is ready for release when all PRD acceptance criteria pass or explicit owner exceptions are recorded; file types, limits, and durability on Bale/the chosen backend are tested; negative tests verify assistant/student authorization; actual daily/weekly/monthly reports and 22:00 notifications work on a test bot; migrations, backup/restore, and deployment are documented; Git contains no real secrets; retention policy is defined; and no release-critical open decision remains unresolved.
 
-Long Polling is the initial single-instance transport choice and private server storage is the owner-selected file backend. The test-bot contract, Elysia/Nginx need, file limits, and retention remain open. Synchronize changes to proposed technical details with PRD and the other documents.
+Long Polling is the single-instance transport, private server storage is the owner-selected file backend, and Nginx routes health endpoints at the owner's request. Automated file retention is implemented; a live Bale test bot, full media validation, and production backup/restore are still required before release. Synchronize changes to proposed technical details with PRD and the other documents.

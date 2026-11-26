@@ -109,7 +109,7 @@ A student may create multiple independent homework records for one class on one 
 - Students may delete their own homework on the same day within the allowed window. Teachers may delete homework belonging to students in their classes; assistants may not.
 - Student deletion is a soft delete. Authorized staff can view all versions and deleted files, with the actor, time, and deletion status clearly identified.
 - Deleted homework is absent from the normal student view. Deleting all active homework for the day makes the student a non-submitter in the report.
-- MVP proposal: teacher deletion is also soft. Whole-homework deletion records a deletion event/version. The MVP has no direct restore operation; physical deletion follows the as-yet-undecided retention policy.
+- MVP proposal: teacher deletion is also soft. Whole-homework deletion records a deletion event/version. The MVP has no direct restore operation; private file bytes are purged after the owner-approved retention period while version metadata remains.
 
 ## 6. Feedback
 
@@ -175,7 +175,7 @@ The reporting unit is “student × class × local Tehran day.” A student with
 
 ## 10. Decisions and remaining checks before dependent implementation
 
-1. **Owner decision (2026-11-25):** Store homework and feedback files in private server storage. Define backup, retention, limits, and recovery before release.
+1. **Owner decision (2026-11-25):** Store homework and feedback files in private server storage. The backend implements the specified file-retention cutoff; backup and restore operations still need deployment validation before release.
 2. Initial transport choice: Long Polling for the single-instance MVP, based on the official Bale API documentation; validate with a test bot before activation. See [BALE_API_SPIKE.md](BALE_API_SPIKE.md).
 3. Verify exact file types, media-group behavior, size/count limits, download/resending, API rates, and callback capabilities against the actual API; do not assume full Telegram compatibility.
 4. **Owner decision (2026-11-25):** Retain homework and feedback files until one year after 31 Shahrivar, the end of their school year. Define safe deletion, consent and notices, storage, backups, and recovery targets before release.

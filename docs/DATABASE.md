@@ -120,7 +120,7 @@ Use `UNIQUE(homework_id,version_no)`, `UNIQUE(homework_id,id)`, `CHECK(version_n
 
 - The owner selected private server storage on 2026-11-25. These fields define a logical contract; adjust the final schema for the private backend. Mark files ready only when valid/durable retrieval is possible. A Bale File ID is distinct from any unique ID; verify identifiers against the API.
 - Object keys are private; permanent public URLs are prohibited. Assets are independent of versions so unchanged files are not duplicated across versions. Use `UNIQUE(teacher_id,id)` and owner-scoped foreign keys in consumers. No cross-owner deduplication in the MVP.
-- Do not physically delete assets referenced by historical versions, feedback, or valid drafts. Define retention separately.
+- Preserve historical asset metadata and references. After the owner-approved retention cutoff, purge private file bytes and mark the asset `purged`; keep files referenced by an unexpired draft or by a homework date within the retention period.
 
 ### `homework_version_files`
 
@@ -201,4 +201,4 @@ Integration tests on real PostgreSQL: invitation/finalization races, membership 
 
 ## 10. Open issues
 
-Private server storage is selected. The owner set file retention to one year after 31 Shahrivar at the end of the relevant school year; safe deletion and backup/recovery details remain open. File limits, precise name/binding history needs (audit or separate tables), report snapshot and mid-day eligibility policy (PRD proposals), and compatible database versions also remain open. This design has not yet been validated with SQL execution or the actual API.
+Private server storage is selected. The backend purges private bytes after one year following 31 Shahrivar of the relevant school year and retains historical metadata. The migration set was applied to a synthetic local PostgreSQL instance; the actual Bale API and backup/restore workflow remain unverified. The current per-file cap is 20 MB and per-homework cap is 20 files; actual-data MIME checks and malware controls remain deployment decisions.
