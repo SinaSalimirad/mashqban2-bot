@@ -136,7 +136,7 @@ export async function changeMembership(
       await tx.insert(classMemberships).values({ teacherId: actor.teacherId,
         studentId, classId, joinedAt: instant, createdByUserId: actor.userId });
     } else if (open) {
-      await tx.update(classMemberships).set({ leftAt: sql`GREATEST(${instant}, ${classMemberships.joinedAt} + interval '1 millisecond')` })
+      await tx.update(classMemberships).set({ leftAt: sql`GREATEST(${instant.toISOString()}::timestamptz, ${classMemberships.joinedAt} + interval '1 millisecond')` })
         .where(eq(classMemberships.id, open.id));
     }
     await tx.insert(auditEvents).values({ teacherId: actor.teacherId, actorUserId: actor.userId,
@@ -178,7 +178,7 @@ export async function deactivateStudent(db: Database, actor: Actor, studentId: s
     )).limit(1);
     if (!student) throw new Error("Student unavailable");
     const instant = await authoritativeTime(tx);
-    await tx.update(classMemberships).set({ leftAt: sql`GREATEST(${instant}, ${classMemberships.joinedAt} + interval '1 millisecond')` }).where(and(
+    await tx.update(classMemberships).set({ leftAt: sql`GREATEST(${instant.toISOString()}::timestamptz, ${classMemberships.joinedAt} + interval '1 millisecond')` }).where(and(
       eq(classMemberships.studentId, studentId), isNull(classMemberships.leftAt),
     ));
     await tx.update(students).set({ disabledAt: instant, userId: null,
@@ -203,12 +203,61 @@ export async function deactivateClass(db: Database, actor: Actor, classId: strin
     )).limit(1);
     if (!schoolClass) throw new Error("Class unavailable");
     const instant = await authoritativeTime(tx);
-    await tx.update(classMemberships).set({ leftAt: sql`GREATEST(${instant}, ${classMemberships.joinedAt} + interval '1 millisecond')` }).where(and(
+    await tx.update(classMemberships).set({ leftAt: sql`GREATEST(${instant.toISOString()}::timestamptz, ${classMemberships.joinedAt} + interval '1 millisecond')` }).where(and(
       eq(classMemberships.classId, classId), isNull(classMemberships.leftAt),
     ));
     await tx.update(classes).set({ disabledAt: instant, updatedAt: instant }).where(eq(classes.id, classId));
     await tx.insert(auditEvents).values({ teacherId: actor.teacherId, actorUserId: actor.userId,
       eventType: "class_deactivated", entityType: "class", entityId: classId,
       occurredAt: instant });
+  });
+}
+
+export async function renameClass(db: Database, actor: Actor, classId: string, value: string): Promise<void> {
+  requireTeacher(actor);
+  const name = cleanName(value, 80);
+  await db.transaction(async (tx) => {
+    const owner = await tx.execute(sql`SELECT id FROM teachers WHERE id = ${actor.teacherId} AND user_id = ${actor.userId} AND disabled_at IS NULL FOR UPDATE`);
+    if (owner.length !== 1) throw new Error("Forbidden");
+    const [schoolClass] = await tx.update(classes).set({ name,
+      normalizedName: name.toLocaleLowerCase("fa-IR"), updatedAt: new Date() })
+      .where(and(eq(classes.id, classId), eq(classes.teacherId, actor.teacherId),
+        isNull(classes.disabledAt))).returning({ id: classes.id });
+    if (!schoolClass) throw new Error("Class unavailable");
+    await tx.insert(auditEvents).values({ teacherId: actor.teacherId, actorUserId: actor.userId,
+      eventType: "class_renamed", entityType: "class", entityId: classId });
+  });
+}
+
+export async function renameStudent(db: Database, actor: Actor, studentId: string,
+  first: string, last: string): Promise<void> {
+  requireTeacher(actor);
+  const firstName = cleanName(first, 80);
+  const lastName = cleanName(last, 80);
+  await db.transaction(async (tx) => {
+    const owner = await tx.execute(sql`SELECT id FROM teachers WHERE id = ${actor.teacherId} AND user_id = ${actor.userId} AND disabled_at IS NULL FOR UPDATE`);
+    if (owner.length !== 1) throw new Error("Forbidden");
+    const [student] = await tx.update(students).set({ firstName, lastName, updatedAt: new Date() })
+      .where(and(eq(students.id, studentId), eq(students.teacherId, actor.teacherId),
+        isNull(students.disabledAt))).returning({ id: students.id });
+    if (!student) throw new Error("Student unavailable");
+    await tx.insert(auditEvents).values({ teacherId: actor.teacherId, actorUserId: actor.userId,
+      eventType: "student_renamed", entityType: "student", entityId: studentId });
+  });
+}
+
+export async function renameAssistant(db: Database, actor: Actor, assistantId: string,
+  value: string): Promise<void> {
+  requireTeacher(actor);
+  const displayName = cleanName(value, 120);
+  await db.transaction(async (tx) => {
+    const owner = await tx.execute(sql`SELECT id FROM teachers WHERE id = ${actor.teacherId} AND user_id = ${actor.userId} AND disabled_at IS NULL FOR UPDATE`);
+    if (owner.length !== 1) throw new Error("Forbidden");
+    const [assistant] = await tx.update(assistants).set({ displayName, updatedAt: new Date() })
+      .where(and(eq(assistants.id, assistantId), eq(assistants.teacherId, actor.teacherId),
+        isNull(assistants.disabledAt))).returning({ id: assistants.id });
+    if (!assistant) throw new Error("Assistant unavailable");
+    await tx.insert(auditEvents).values({ teacherId: actor.teacherId, actorUserId: actor.userId,
+      eventType: "assistant_renamed", entityType: "assistant", entityId: assistantId });
   });
 }

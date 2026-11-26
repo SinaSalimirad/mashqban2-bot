@@ -4,7 +4,7 @@ import {
   assistants, classes, dailyReportEntries, dailyReports, outboxMessages,
   teachers, users,
 } from "../../database/schema.ts";
-import { getPeriodBounds, getTehranHourInstant } from "../../shared/calendar.ts";
+import { getPeriodBounds, getTehranHourInstant, getTehranTime } from "../../shared/calendar.ts";
 import { authoritativeTime } from "../homeworks/service.ts";
 import type { Actor } from "../auth/service.ts";
 
@@ -37,14 +37,14 @@ export async function closeSchoolDay(db: Database, teacherId: string, schoolDate
         FROM homeworks h
         JOIN LATERAL (
           SELECT v.kind FROM homework_versions v
-          WHERE v.homework_id = h.id AND v.created_at < ${windowEnd}
+          WHERE v.homework_id = h.id AND v.created_at < ${windowEnd.toISOString()}::timestamptz
           ORDER BY v.version_no DESC LIMIT 1
         ) latest ON true
         WHERE h.teacher_id = ${teacherId} AND h.school_date = ${schoolDate}::date
       ), eligible AS (
         SELECT m.class_id, m.student_id FROM class_memberships m
-        WHERE m.teacher_id = ${teacherId} AND m.joined_at < ${windowEnd}
-          AND (m.left_at IS NULL OR m.left_at > ${windowStart})
+        WHERE m.teacher_id = ${teacherId} AND m.joined_at < ${windowEnd.toISOString()}::timestamptz
+          AND (m.left_at IS NULL OR m.left_at > ${windowStart.toISOString()}::timestamptz)
         UNION
         SELECT h.class_id, h.student_id FROM valid_homeworks h WHERE h.kind <> 'deleted'
       )
@@ -61,7 +61,7 @@ export async function closeSchoolDay(db: Database, teacherId: string, schoolDate
     `);
     const rows = rawRows as unknown as ReportRow[];
     const allClasses = await tx.select({ id: classes.id, name: classes.name }).from(classes)
-      .where(and(eq(classes.teacherId, teacherId), sql`${classes.createdAt} < ${windowEnd}`));
+      .where(and(eq(classes.teacherId, teacherId), sql`${classes.createdAt} < ${windowEnd.toISOString()}::timestamptz`));
     const summaries = allClasses.map((schoolClass) => {
       const entries = rows.filter((row) => row.class_id === schoolClass.id);
       return { classId: schoolClass.id, name: schoolClass.name,
@@ -125,8 +125,52 @@ export async function readDailyReport(db: Database, actor: Actor, schoolDate: st
   )).limit(1);
   if (!report) return null;
   const entries = await db.select().from(dailyReportEntries)
-    .where(and(eq(dailyReportEntries.teacherId, actor.teacherId), eq(dailyReportEntries.reportId, report.id)));
+    .where(and(eq(dailyReportEntries.teacherId, actor.teacherId), eq(dailyReportEntries.reportId, report.id)))
+    .orderBy(dailyReportEntries.classNameSnapshot, dailyReportEntries.studentNameSnapshot,
+      dailyReportEntries.studentId);
   return { report, entries };
+}
+
+export async function readProvisionalDailyReport(db: Database, actor: Actor, schoolDate: string) {
+  await requireActiveStaff(db, actor);
+  const now = new Date();
+  if (getTehranTime(now).schoolDate !== schoolDate || now >= getTehranHourInstant(schoolDate, 22)) {
+    return null;
+  }
+  const windowStart = getTehranHourInstant(schoolDate, 14);
+  const rawRows = await db.execute(sql`
+    WITH eligible AS (
+      SELECT m.class_id, m.student_id FROM class_memberships m
+      WHERE m.teacher_id = ${actor.teacherId} AND m.joined_at <= ${now.toISOString()}::timestamptz
+        AND (m.left_at IS NULL OR m.left_at > ${windowStart.toISOString()}::timestamptz)
+      UNION
+      SELECT h.class_id, h.student_id FROM homeworks h
+      WHERE h.teacher_id = ${actor.teacherId} AND h.school_date = ${schoolDate}::date
+        AND h.deleted_at IS NULL
+    )
+    SELECT e.class_id, e.student_id, c.name AS class_name,
+      s.first_name, s.last_name,
+      count(h.id)::integer AS active_count
+    FROM eligible e
+    JOIN classes c ON c.id = e.class_id AND c.teacher_id = ${actor.teacherId}
+    JOIN students s ON s.id = e.student_id AND s.teacher_id = ${actor.teacherId}
+    LEFT JOIN homeworks h ON h.class_id = e.class_id AND h.student_id = e.student_id
+      AND h.school_date = ${schoolDate}::date AND h.deleted_at IS NULL
+    GROUP BY e.class_id, e.student_id, c.name, s.first_name, s.last_name
+    ORDER BY c.name, s.last_name, s.first_name, e.student_id
+  `) as unknown as Array<Omit<ReportRow, "had_deleted">>;
+  const classesForDay = await db.select({ id: classes.id, name: classes.name }).from(classes)
+    .where(and(eq(classes.teacherId, actor.teacherId), sql`${classes.createdAt} <= ${now.toISOString()}::timestamptz`));
+  const classSummaries = classesForDay.map((schoolClass) => {
+    const entries = rawRows.filter((row) => row.class_id === schoolClass.id);
+    return { classId: schoolClass.id, name: schoolClass.name,
+      submitted: entries.filter((row) => Number(row.active_count) > 0).length,
+      missing: entries.filter((row) => Number(row.active_count) === 0).length };
+  });
+  return { classSummaries, entries: rawRows.map((row) => ({
+    classNameSnapshot: row.class_name, studentNameSnapshot: `${row.first_name} ${row.last_name}`,
+    submitted: Number(row.active_count) > 0,
+  })) };
 }
 
 export async function readPeriodReport(db: Database, actor: Actor, reference: Date, period: "week" | "month") {
@@ -134,8 +178,8 @@ export async function readPeriodReport(db: Database, actor: Actor, reference: Da
   const bounds = getPeriodBounds(reference, period);
   const rows = await db.execute(sql`
     SELECT e.class_id, e.student_id,
-      max(e.class_name_snapshot) AS class_name,
-      max(e.student_name_snapshot) AS student_name,
+      (array_agg(e.class_name_snapshot ORDER BY r.school_date DESC))[1] AS class_name,
+      (array_agg(e.student_name_snapshot ORDER BY r.school_date DESC))[1] AS student_name,
       count(*)::integer AS eligible_days,
       count(*) FILTER (WHERE e.submitted)::integer AS submitted_days
     FROM daily_report_entries e

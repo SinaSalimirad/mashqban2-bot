@@ -1,7 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Database } from "../../database/client.ts";
-import { assistants, auditEvents, invitations, students, teachers, users } from "../../database/schema.ts";
+import { assistants, auditEvents, invitationAttempts, invitations, students, teachers, users } from "../../database/schema.ts";
 import type { Actor } from "../auth/service.ts";
 
 type Target = { kind: "student" | "assistant"; id: string };
@@ -14,7 +14,8 @@ export function hashInvitationCode(code: string, secret: string): string {
   return createHmac("sha256", secret).update(normalizeCode(code)).digest("hex");
 }
 
-export async function issueInvitation(db: Database, teacher: Actor, target: Target, secret: string): Promise<string> {
+export async function issueInvitation(db: Database, teacher: Actor, target: Target, secret: string,
+  rebind = false): Promise<string> {
   if (teacher.role !== "teacher") throw new Error("Forbidden");
   const code = randomBytes(20).toString("hex").toUpperCase();
   const codeDigest = hashInvitationCode(code, secret);
@@ -26,7 +27,19 @@ export async function issueInvitation(db: Database, teacher: Actor, target: Targ
     const targetRow = target.kind === "student"
       ? (await tx.select().from(students).where(and(eq(students.id, target.id), eq(students.teacherId, teacher.teacherId), isNull(students.disabledAt))).limit(1))[0]
       : (await tx.select().from(assistants).where(and(eq(assistants.id, target.id), eq(assistants.teacherId, teacher.teacherId), isNull(assistants.disabledAt))).limit(1))[0];
-    if (!targetRow || targetRow.userId) throw new Error("Invitation target unavailable");
+    if (!targetRow || (targetRow.userId && !rebind)) throw new Error("Invitation target unavailable");
+    const bindingRevision = targetRow.bindingRevision + (targetRow.userId ? 1 : 0);
+    if (targetRow.userId && rebind) {
+      if (target.kind === "student") {
+        await tx.update(students).set({ userId: null, bindingRevision, updatedAt: now })
+          .where(and(eq(students.id, target.id), eq(students.teacherId, teacher.teacherId)));
+      } else {
+        await tx.update(assistants).set({ userId: null, bindingRevision, updatedAt: now })
+          .where(and(eq(assistants.id, target.id), eq(assistants.teacherId, teacher.teacherId)));
+      }
+      await tx.insert(auditEvents).values({ teacherId: teacher.teacherId, actorUserId: teacher.userId,
+        eventType: `${target.kind}_disconnected`, entityType: target.kind, entityId: target.id });
+    }
 
     await tx.update(invitations).set({ revokedAt: now }).where(and(
       eq(invitations.teacherId, teacher.teacherId),
@@ -40,7 +53,7 @@ export async function issueInvitation(db: Database, teacher: Actor, target: Targ
       codeDigest,
       issuedByUserId: teacher.userId,
       expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
-      targetBindingRevision: targetRow.bindingRevision,
+      targetBindingRevision: bindingRevision,
     });
     await tx.insert(auditEvents).values({
       teacherId: teacher.teacherId, actorUserId: teacher.userId,
@@ -48,6 +61,27 @@ export async function issueInvitation(db: Database, teacher: Actor, target: Targ
     });
   });
   return code;
+}
+
+export async function revokeInvitation(db: Database, teacher: Actor, target: Target): Promise<void> {
+  if (teacher.role !== "teacher") throw new Error("Forbidden");
+  await db.transaction(async (tx) => {
+    const owner = await tx.execute(sql`SELECT id FROM teachers WHERE id = ${teacher.teacherId} AND user_id = ${teacher.userId} AND disabled_at IS NULL FOR UPDATE`);
+    if (owner.length !== 1) throw new Error("Forbidden");
+    const targetRow = target.kind === "student"
+      ? (await tx.select({ id: students.id }).from(students).where(and(
+        eq(students.id, target.id), eq(students.teacherId, teacher.teacherId))).limit(1))[0]
+      : (await tx.select({ id: assistants.id }).from(assistants).where(and(
+        eq(assistants.id, target.id), eq(assistants.teacherId, teacher.teacherId))).limit(1))[0];
+    if (!targetRow) throw new Error("Invitation target unavailable");
+    await tx.update(invitations).set({ revokedAt: new Date() }).where(and(
+      eq(invitations.teacherId, teacher.teacherId),
+      target.kind === "student" ? eq(invitations.studentId, target.id) : eq(invitations.assistantId, target.id),
+      isNull(invitations.consumedAt), isNull(invitations.revokedAt),
+    ));
+    await tx.insert(auditEvents).values({ teacherId: teacher.teacherId, actorUserId: teacher.userId,
+      eventType: "invitation_revoked", entityType: target.kind, entityId: target.id });
+  });
 }
 
 export async function redeemInvitation(
@@ -63,6 +97,17 @@ export async function redeemInvitation(
 export async function redeemInvitationDigest(
   db: Database, codeDigest: string, baleUserId: string, privateChatId: string,
 ): Promise<boolean> {
+  const [attempt] = await db.insert(invitationAttempts).values({
+    baleUserId: BigInt(baleUserId), attemptCount: 1,
+  }).onConflictDoUpdate({ target: invitationAttempts.baleUserId,
+    set: {
+      attemptCount: sql`CASE WHEN ${invitationAttempts.windowStartedAt} < clock_timestamp() - interval '1 hour'
+        THEN 1 ELSE ${invitationAttempts.attemptCount} + 1 END`,
+      windowStartedAt: sql`CASE WHEN ${invitationAttempts.windowStartedAt} < clock_timestamp() - interval '1 hour'
+        THEN clock_timestamp() ELSE ${invitationAttempts.windowStartedAt} END`,
+    },
+  }).returning({ attemptCount: invitationAttempts.attemptCount });
+  if (!attempt || attempt.attemptCount > 5) return false;
   const [candidate] = await db.select({ teacherId: invitations.teacherId }).from(invitations)
     .where(eq(invitations.codeDigest, codeDigest)).limit(1);
   if (!candidate) return false;

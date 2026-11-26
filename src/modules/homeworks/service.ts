@@ -28,8 +28,9 @@ export async function saveHomework(db: Database, actor: Actor, input: SaveInput)
   if (actor.role !== "student") throw new Error("Forbidden");
   const title = input.title.trim();
   if (!title || title.length > 120) throw new Error("Invalid homework title");
-  if (!input.assetIds.length || new Set(input.assetIds).size !== input.assetIds.length) {
-    throw new Error("At least one distinct file is required");
+  if (!input.assetIds.length || input.assetIds.length > 20
+    || new Set(input.assetIds).size !== input.assetIds.length) {
+    throw new Error("Homework requires 1 to 20 distinct files");
   }
   if (Boolean(input.homeworkId) !== Boolean(input.baseVersionId)) throw new Error("Invalid edit base");
 

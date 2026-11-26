@@ -74,7 +74,7 @@ export function formatPersianSchoolDate(instant: Date): string {
   return persianCalendar.format(instant);
 }
 
-export function getTehranHourInstant(schoolDate: SchoolDate, hour: 14 | 22): Date {
+export function getTehranHourInstant(schoolDate: SchoolDate, hour: 0 | 14 | 22): Date {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(schoolDate)) throw new RangeError("Invalid school date");
   const midnightUtc = Date.parse(`${schoolDate}T00:00:00.000Z`);
   if (Number.isNaN(midnightUtc) || new Date(midnightUtc).toISOString().slice(0, 10) !== schoolDate) {
@@ -107,7 +107,7 @@ function shiftSchoolDate(schoolDate: SchoolDate, days: number): SchoolDate {
 }
 
 const persianMonth = new Intl.DateTimeFormat("en-US-u-ca-persian", {
-  timeZone: SCHOOL_TIME_ZONE, year: "numeric", month: "numeric",
+  timeZone: SCHOOL_TIME_ZONE, year: "numeric", month: "numeric", day: "numeric",
 });
 
 function persianMonthKey(schoolDate: SchoolDate): string {
@@ -139,4 +139,34 @@ export function getPeriodBounds(reference: Date, period: "week" | "month"): {
     if (persianMonthKey(endExclusive) !== key) break;
   }
   return { start, endExclusive };
+}
+
+export function parseSchoolDateInput(input: string): SchoolDate | null {
+  const normalized = input.replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 1776))
+    .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 1632));
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    try {
+      getTehranHourInstant(normalized, 14);
+      return normalized;
+    } catch { return null; }
+  }
+  const match = /^(\d{4})\/(\d{1,2})\/(\d{1,2})$/.exec(normalized);
+  if (!match) return null;
+  const persianYear = Number(match[1]);
+  const persianMonthNumber = Number(match[2]);
+  const persianDay = Number(match[3]);
+  if (persianYear < 1300 || persianYear > 1600 || persianMonthNumber < 1
+    || persianMonthNumber > 12 || persianDay < 1 || persianDay > 31) return null;
+  const first = Date.UTC(persianYear + 621, 2, 1, 12);
+  for (let day = 0; day < 390; day += 1) {
+    const instant = new Date(first + day * 86_400_000);
+    const parts = persianMonth.formatToParts(instant);
+    const year = Number(parts.find((part) => part.type === "year")?.value);
+    const month = Number(parts.find((part) => part.type === "month")?.value);
+    const date = Number(parts.find((part) => part.type === "day")?.value);
+    if (year === persianYear && month === persianMonthNumber && date === persianDay) {
+      return getTehranTime(instant).schoolDate;
+    }
+  }
+  return null;
 }
