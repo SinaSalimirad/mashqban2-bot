@@ -15,8 +15,8 @@ This document is intended for the developer and Codex; it does not imply that co
 | Architecture | MVP proposal | Modular monolith, one application service and one DB |
 | HTTP framework | Conditional | ElysiaJS if Webhooks or HTTP endpoints are needed; native Bun is also an option |
 | Reverse proxy | Conditional | Nginx for HTTPS/Webhooks if needed |
-| Update delivery | Open | Long Polling or Webhook after reviewing Bale API and server environment |
-| File storage | Open — ask owner | File IDs / private server storage / hybrid |
+| Update delivery | Initial choice | Long Polling for a single instance; test-bot verification pending |
+| File storage | Owner decision | Private server storage for homework and feedback files |
 | API client | MVP proposal | Lightweight custom fetch adapter; do not assume full Telegram compatibility |
 | Queue / session / scheduler | MVP proposal | PostgreSQL, without Redis or a separate queue service |
 | UI | Confirmed | Bale bot only; no web panel or public product-management API |
@@ -186,9 +186,11 @@ Multi-file/version workflows use an operation ID independent of update ID; doubl
 - Published versions are immutable; drafts are separate. Removing a file removes its association only in the new snapshot. Preserve earlier versions. Commit atomically with an optimistic base-version check. Reports and feedback never reference drafts.
 - Reports are live before 22:00; historical snapshots afterward are proposed. Backfill reconstructs historical versions/membership at the 22:00 boundary, not today's state. PRD and DATABASE define the precise policy.
 
-## 8. File storage design — open owner decision
+## 8. File storage design — owner decision
 
-**Before implementing file storage, ask the owner:** “Should homework and feedback files be stored on the server/private storage, rely on Bale File IDs, or use a hybrid?” Record the question and answer. Codex must not choose the final backend unilaterally.
+**Owner decision (2026-11-25):** Store homework and feedback files in private server storage. Bale File IDs may be retained as provider references, but are not the durability source. Define backup, retention, upload limits, and recovery before release.
+
+The owner specified retention until one year after 31 Shahrivar at the end of the relevant school year. Implement deletion only after identifying all references, backing up according to the final policy, and confirming that historical versions and feedback no longer need the asset.
 
 | Option | Benefit | Risk/condition |
 |---|---|---|
@@ -303,4 +305,4 @@ For each phase: small reviewable changes, relevant tests, typecheck, and recorde
 
 The MVP is ready for release when all PRD acceptance criteria pass or explicit owner exceptions are recorded; file types, limits, and durability on Bale/the chosen backend are tested; negative tests verify assistant/student authorization; actual daily/weekly/monthly reports and 22:00 notifications work on a test bot; migrations, backup/restore, and deployment are documented; Git contains no real secrets; retention policy is defined; and no release-critical open decision remains unresolved.
 
-This document does not finalize Webhook/Polling, Elysia/Nginx, the file backend, exact dependency versions, file limits, or retention. Synchronize changes to proposed technical details with PRD and the other documents.
+Long Polling is the initial single-instance transport choice and private server storage is the owner-selected file backend. The test-bot contract, Elysia/Nginx need, file limits, and retention remain open. Synchronize changes to proposed technical details with PRD and the other documents.

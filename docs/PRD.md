@@ -173,10 +173,10 @@ The reporting unit is “student × class × local Tehran day.” A student with
 | AC-15 | Update repeats or Finalize is pressed twice | Exactly one business effect is committed. |
 | AC-16 | Invalid file, DB failure, or cancellation before save | Incomplete homework excluded from statistics; previous version preserved. |
 
-## 10. Open decisions before dependent implementation
+## 10. Decisions and remaining checks before dependent implementation
 
-1. **Ask the product owner:** Store files on the server/private storage, rely on Bale File IDs, or use a hybrid? Until the owner answers and File ID durability is verified, retaining old versions cannot be technically guaranteed.
-2. Choose Webhook or Long Polling after checking official Bale documentation and server conditions; use Elysia and Nginx only if needed.
+1. **Owner decision (2026-11-25):** Store homework and feedback files in private server storage. Define backup, retention, limits, and recovery before release.
+2. Initial transport choice: Long Polling for the single-instance MVP, based on the official Bale API documentation; validate with a test bot before activation. See [BALE_API_SPIKE.md](BALE_API_SPIKE.md).
 3. Verify exact file types, media-group behavior, size/count limits, download/resending, API rates, and callback capabilities against the actual API; do not assume full Telegram compatibility.
-4. Before release, define file/data retention and deletion, necessary consent and notices for student data, storage, backups, and recovery targets.
+4. **Owner decision (2026-11-25):** Retain homework and feedback files until one year after 31 Shahrivar, the end of their school year. Define safe deletion, consent and notices, storage, backups, and recovery targets before release.
 5. This document's MVP proposals—especially report finalization, mid-day membership eligibility, invitation expiry, and teacher soft deletion—are proposals, not separate explicit owner approvals. If changed, update all four documents together.
