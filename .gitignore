@@ -1,3 +1,9 @@
 # IDE-managed instruction mounts are not project files.
 .codex/
 .agents/
+node_modules/
+.env
+.env.*
+!.env.example
+coverage/
+private-files/
