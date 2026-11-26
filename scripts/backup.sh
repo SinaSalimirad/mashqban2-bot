@@ -13,19 +13,27 @@ backup_directory=$(cd "$backup_directory" && pwd)
 backup_stamp=$(date -u +%Y%m%dT%H%M%SZ)
 database_archive="$backup_directory/mashqban-$backup_stamp.pgcustom"
 files_archive="$backup_directory/mashqban-$backup_stamp.files.tar.gz"
+checksums="$backup_directory/mashqban-$backup_stamp.sha256"
 
-if [ -e "$database_archive" ] || [ -e "$files_archive" ]; then
+if [ -e "$database_archive" ] || [ -e "$files_archive" ] || [ -e "$checksums" ]; then
   echo "Backup destination already exists" >&2
   exit 1
 fi
 
-restart_app() {
-  docker compose up -d app >/dev/null
+app_was_running=$(docker compose ps --status running -q app)
+
+cleanup() {
+  rm -f "$database_archive.tmp" "$files_archive.tmp" "$checksums.tmp"
+  if [ -n "$app_was_running" ]; then
+    docker compose up -d app >/dev/null
+  fi
 }
 
-trap restart_app EXIT
+trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
-docker compose stop app
+if [ -n "$app_was_running" ]; then
+  docker compose stop app
+fi
 
 if ! docker compose exec -T db pg_dump -U mashqban -Fc mashqban > "$database_archive.tmp"; then
   rm -f "$database_archive.tmp"
@@ -39,4 +47,7 @@ fi
 
 mv "$database_archive.tmp" "$database_archive"
 mv "$files_archive.tmp" "$files_archive"
-echo "Backup written to $database_archive and $files_archive"
+(cd "$backup_directory" && sha256sum "$(basename "$database_archive")" \
+  "$(basename "$files_archive")") > "$checksums.tmp"
+mv "$checksums.tmp" "$checksums"
+echo "Backup written to $database_archive, $files_archive, and $checksums"

@@ -6,16 +6,19 @@ databaseUrl.password = password;
 process.env.DATABASE_URL = databaseUrl.toString();
 
 const task = Bun.argv[2];
-if (task === "migrate") {
-  const migration = Bun.spawn(["bun", "run", "db:migrate"], {
-    cwd: "/app", env: process.env, stdout: "inherit", stderr: "inherit",
-  });
-  process.exit(await migration.exited);
-}
-if (task === "app") {
-  await import("./index.ts");
-} else if (task === "outbox") {
-  await import("./operator.ts");
-} else {
-  throw new Error("Unknown container task");
+switch (task) {
+  case "migrate":
+    await import("./migrate.ts");
+    break;
+  case "app":
+    await import("./index.ts");
+    break;
+  case "outbox":
+    await import("./operator.ts");
+    break;
+  case "check":
+    await import("./check-config.ts");
+    break;
+  default:
+    throw new Error("Unknown container task");
 }

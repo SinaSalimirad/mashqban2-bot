@@ -3,7 +3,7 @@ FROM oven/bun:1.4.4-slim
 WORKDIR /app
 
 COPY --chown=bun:bun package.json bun.lock ./
-RUN bun install --frozen-lockfile
+RUN bun install --frozen-lockfile --production
 
 COPY --chown=bun:bun tsconfig.json drizzle.config.ts ./
 COPY --chown=bun:bun drizzle ./drizzle

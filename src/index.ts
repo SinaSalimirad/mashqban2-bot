@@ -23,7 +23,9 @@ const bale = new BaleClient(config.baleBotToken);
 const lockClient = postgres(config.databaseUrl, { max: 1, idle_timeout: 0, prepare: false });
 let stopping = false;
 let ready = false;
-const healthServer = startHealthServer(db, healthPort, () => ready && !stopping);
+let lastSuccessfulLoopAt = Date.now();
+const healthServer = startHealthServer(db, healthPort,
+  () => ready && !stopping && Date.now() - lastSuccessfulLoopAt < 90_000);
 process.on("SIGINT", () => { stopping = true; });
 process.on("SIGTERM", () => { stopping = true; });
 
@@ -53,10 +55,13 @@ try {
         bale, storage, config.inviteCodeSecret)) handled += 1;
       let delivered = 0;
       while (delivered < 100 && await dispatchOneOutbox(db, bale, storage)) delivered += 1;
+      lastSuccessfulLoopAt = Date.now();
       if (handled === 100 || delivered === 100) continue;
       await pollIntoInbox(db, bale, config.botInstanceKey, config.inviteCodeSecret);
-    } catch {
-      console.error("Bot loop failed; retrying after a short delay.");
+      lastSuccessfulLoopAt = Date.now();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Unknown error";
+      console.error(`Bot loop failed (${reason}); retrying after a short delay.`);
       await Bun.sleep(2_000);
     }
   }
