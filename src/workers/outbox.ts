@@ -1,7 +1,8 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Database } from "../database/client.ts";
-import { assistants, fileAssets, outboxMessages, students, teachers, users } from "../database/schema.ts";
-import { BaleApiError, type BaleClient } from "../bot/bale/client.ts";
+import { assistants, fileAssets, homeworks, homeworkVersionFiles, homeworkVersions,
+  outboxMessages, students, teachers, users } from "../database/schema.ts";
+import { BaleApiError, type BaleButton, type BaleClient } from "../bot/bale/client.ts";
 import type { PrivateFileStorage } from "../storage/private.ts";
 import { formatPersianSchoolDate, getTehranHourInstant } from "../shared/calendar.ts";
 
@@ -27,6 +28,27 @@ function textPayload(payload: unknown): string {
   const text = (payload as Record<string, unknown>).text;
   if (typeof text !== "string" || !text) throw new Error("Invalid message payload");
   return text;
+}
+
+function replyButtons(payload: unknown): BaleButton[][] | undefined {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return undefined;
+  const buttons = (payload as Record<string, unknown>).buttons;
+  if (buttons === undefined) return undefined;
+  if (!Array.isArray(buttons)) throw new Error("Invalid button payload");
+  return buttons.map((row) => {
+    if (!Array.isArray(row)) throw new Error("Invalid button payload");
+    return row.map((button) => {
+      if (typeof button !== "object" || button === null || Array.isArray(button)) throw new Error("Invalid button payload");
+      const value = button as Record<string, unknown>;
+      if (typeof value.text !== "string" || typeof value.callback_data !== "string") throw new Error("Invalid button payload");
+      const style = value.style;
+      if (style !== undefined && style !== "primary" && style !== "success" && style !== "danger") {
+        throw new Error("Invalid button style");
+      }
+      return { text: value.text, callback_data: value.callback_data,
+        ...(style ? { style } : {}) };
+    });
+  });
 }
 
 export async function recoverExpiredOutboxLeases(db: Database): Promise<number> {
@@ -70,7 +92,11 @@ export async function dispatchOneOutbox(db: Database, bale: BaleClient, storage:
         eq(assistants.teacherId, item.teacherId), eq(assistants.userId, item.recipientUserId),
         isNull(assistants.disabledAt),
       )).limit(1);
-      if (owner || assistant) {
+      const [student] = owner || assistant ? [] : await db.select({ id: students.id }).from(students).where(and(
+        eq(students.teacherId, item.teacherId), eq(students.userId, item.recipientUserId),
+        isNull(students.disabledAt),
+      )).limit(1);
+      if (owner || assistant || student) {
         const [recipient] = await db.select({ chatId: users.privateChatId }).from(users)
           .where(eq(users.id, item.recipientUserId)).limit(1);
         chatId = recipient?.chatId?.toString() ?? null;
@@ -87,7 +113,44 @@ export async function dispatchOneOutbox(db: Database, bale: BaleClient, storage:
     }
 
     let providerMessageId: string;
-    if (item.kind === "feedback_voice") {
+    if (item.kind === "homework_file") {
+      if (typeof item.payload !== "object" || item.payload === null || Array.isArray(item.payload)) {
+        throw new Error("Invalid homework file payload");
+      }
+      const payload = item.payload as Record<string, unknown>;
+      if (typeof payload.homeworkId !== "string" || typeof payload.versionId !== "string"
+        || typeof payload.assetId !== "string" || !item.teacherId) {
+        throw new Error("Invalid homework file payload");
+      }
+      const [homework] = await db.select().from(homeworks).where(and(
+        eq(homeworks.id, payload.homeworkId), eq(homeworks.teacherId, item.teacherId),
+      )).limit(1);
+      const [version] = await db.select({ id: homeworkVersions.id }).from(homeworkVersions).where(and(
+        eq(homeworkVersions.id, payload.versionId), eq(homeworkVersions.homeworkId, payload.homeworkId),
+      )).limit(1);
+      const [file] = await db.select({ id: homeworkVersionFiles.assetId }).from(homeworkVersionFiles).where(and(
+        eq(homeworkVersionFiles.homeworkId, payload.homeworkId),
+        eq(homeworkVersionFiles.versionId, payload.versionId),
+        eq(homeworkVersionFiles.assetId, payload.assetId),
+      )).limit(1);
+      if (!homework || !version || !file) throw new Error("Homework file unavailable");
+      if (item.targetStudentId && (homework.studentId !== item.targetStudentId
+        || homework.currentVersionId !== version.id || homework.deletedAt)) {
+        await db.update(outboxMessages).set({ status: "cancelled", leaseUntil: null,
+          lastErrorCode: "access_revoked" }).where(eq(outboxMessages.id, item.id));
+        return true;
+      }
+      const [asset] = await db.select().from(fileAssets).where(and(
+        eq(fileAssets.id, file.id), eq(fileAssets.teacherId, item.teacherId),
+        eq(fileAssets.status, "ready"),
+      )).limit(1);
+      if (!asset?.storageKey) throw new Error("Homework asset unavailable");
+      const kind = asset.kind;
+      if (kind !== "photo" && kind !== "document" && kind !== "video"
+        && kind !== "voice" && kind !== "audio") throw new Error("Unsupported file kind");
+      providerMessageId = await bale.sendMedia(chatId, kind,
+        await storage.read(item.teacherId, asset.storageKey), asset.mimeType ?? "application/octet-stream");
+    } else if (item.kind === "feedback_voice") {
       if (typeof item.payload !== "object" || item.payload === null || Array.isArray(item.payload)) {
         throw new Error("Invalid voice payload");
       }
@@ -99,8 +162,24 @@ export async function dispatchOneOutbox(db: Database, bale: BaleClient, storage:
       if (!asset?.storageKey) throw new Error("Voice asset unavailable");
       providerMessageId = await bale.sendVoice(chatId, await storage.read(item.teacherId, asset.storageKey));
     } else {
-      providerMessageId = await bale.sendText(chatId,
-        item.kind === "daily_report" ? reportText(item.payload) : textPayload(item.payload));
+      const text = item.kind === "daily_report" ? reportText(item.payload) : textPayload(item.payload);
+      const buttons = item.kind === "bot_reply" ? replyButtons(item.payload) : undefined;
+      const payload = typeof item.payload === "object" && item.payload !== null && !Array.isArray(item.payload)
+        ? item.payload as Record<string, unknown> : {};
+      const editMessageId = payload.editMessageId;
+      if (item.kind === "bot_reply" && typeof editMessageId === "number"
+        && Number.isSafeInteger(editMessageId) && editMessageId > 0) {
+        try {
+          providerMessageId = await bale.editText(chatId, editMessageId, text, buttons);
+        } catch (error) {
+          if (!(error instanceof BaleApiError) || error.code === null || error.code >= 500 || error.code === 429) {
+            throw error;
+          }
+          providerMessageId = await bale.sendText(chatId, text, buttons);
+        }
+      } else {
+        providerMessageId = await bale.sendText(chatId, text, buttons);
+      }
     }
     await db.update(outboxMessages).set({ status: "sent", providerMessageId,
       sentAt: new Date(), leaseUntil: null, lastErrorCode: null }).where(eq(outboxMessages.id, item.id));

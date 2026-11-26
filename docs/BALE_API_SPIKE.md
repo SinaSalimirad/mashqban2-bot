@@ -22,3 +22,11 @@ Use **long polling** for the single-instance MVP. It needs no public endpoint. P
 - API rate limits, transient errors/retry hints, webhook authentication, and behavior around restarts and a 24-hour outage.
 
 The 24-hour upstream retention means the application cannot reconstruct updates that Bale has already expired. Monitoring, timely restart, and durable local ingestion are required.
+
+## BOT_UX feasibility review (2026-11-26)
+
+The [official Bale bot documentation](https://docs.bale.ai/) confirms that the main chat-based UX is feasible: `sendMessage` accepts inline and reply keyboards, inline buttons produce `callback_query` updates, `answerCallbackQuery` acknowledges clicks, and `editMessageText` can replace a bot message and its keyboard. `callback_data` is limited to 1–64 bytes, so the implementation sends a short opaque token and keeps the action in PostgreSQL. The bot also has `sendPhoto`, `sendDocument`, `sendVideo`, `sendAudio`, `sendVoice`, and `getFile` methods; `getFile` limits downloads to 20 MB.
+
+There are documented limits: `setMyCommands` exposes one shared slash-command list for the entire bot, so role-specific menus must be rendered in chat and checked on the server. Old Bale clients may not support the callback acknowledgment UI; for callback IDs beginning with `1`, the bot sends a normal message. An incoming album item exposes `media_group_id`, but the API documentation does not define a reliable album-complete event. The bot therefore collects each incoming file as a separate draft item and requires the user to review the count before finalizing. `sendMediaGroup` currently supports photo/video only, so it is not the path for arbitrary homework files.
+
+The implementation now uses inline menus, one-use scoped callback tokens, message editing with a send-new-message fallback, private-chat workflows, pagination, and text-command fallbacks. These are documentation-backed choices, not a live contract result. A test bot is still needed to verify old-client behavior, exact callback shapes, media groups, voice codecs, and upload limits before real student use.

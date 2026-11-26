@@ -111,6 +111,14 @@ export const invitations = pgTable("invitations", {
   check("invitations_expiry_valid", sql`${table.expiresAt} > ${table.createdAt}`),
 ]);
 
+export const invitationAttempts = pgTable("invitation_attempts", {
+  baleUserId: identity("bale_user_id").primaryKey(),
+  windowStartedAt: time("window_started_at").notNull().defaultNow(),
+  attemptCount: integer("attempt_count").notNull().default(0),
+}, (table) => [
+  check("invitation_attempts_count_nonnegative", sql`${table.attemptCount} >= 0`),
+]);
+
 export const fileAssets = pgTable("file_assets", {
   id: uuid("id").primaryKey().defaultRandom(),
   teacherId: uuid("teacher_id").notNull().references(() => teachers.id),

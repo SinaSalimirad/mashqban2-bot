@@ -1,10 +1,11 @@
 import { and, eq, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
-import type { BaleClient, BaleUpdate } from "../bot/bale/client.ts";
+import type { BaleButton, BaleClient, BaleUpdate } from "../bot/bale/client.ts";
 import { parseUpdate } from "../bot/bale/client.ts";
 import { handleAuthorizedMessage } from "../bot/router.ts";
+import { consumeMenuButton, createMenuButtons, invalidateMenuButtons } from "../bot/callbacks.ts";
 import type { Database } from "../database/client.ts";
-import { outboxMessages, processedUpdates } from "../database/schema.ts";
+import { outboxMessages, processedUpdates, users } from "../database/schema.ts";
 import { findActor, touchPrivateUser } from "../modules/auth/service.ts";
 import { hashInvitationCode, redeemInvitationDigest } from "../modules/invitations/service.ts";
 import type { PrivateFileStorage } from "../storage/private.ts";
@@ -35,17 +36,25 @@ export async function pollIntoInbox(
   const updates = await bale.getUpdates(offset);
   if (!updates.length) return 0;
 
+  const prepared = await Promise.all(updates.map(async (update) => {
+    const message = update.message;
+    const rawText = message?.text?.trim();
+    if (!message || message.chat.type !== "private" || !message.from || !rawText || rawText.startsWith("/")) {
+      return { update };
+    }
+    await touchPrivateUser(db, String(message.from.id), String(message.chat.id));
+    const actor = await findActor(db, String(message.from.id), String(message.chat.id));
+    const looksLikeCode = /^[A-Fa-f0-9 -]{40,60}$/.test(rawText);
+    if (actor && !looksLikeCode) return { update };
+    const invitationDigest = hashInvitationCode(rawText, inviteCodeSecret);
+    return { update: { ...update, message: { ...message, text: undefined } }, invitationDigest };
+  }));
+
   await db.transaction(async (tx) => {
-    for (const update of updates) {
-      const message = update.message;
-      const text = message?.text?.trim();
-      const codeDigest = text && !text.startsWith("/") ? hashInvitationCode(text, inviteCodeSecret) : undefined;
-      const sanitized: BaleUpdate = message && codeDigest
-        ? { update_id: update.update_id, message: { ...message, text: undefined } }
-        : update;
+    for (const { update, invitationDigest } of prepared) {
       await tx.insert(processedUpdates).values({
         botInstanceKey, updateId: BigInt(update.update_id),
-        payload: { update: sanitized, ...(codeDigest ? { invitationDigest: codeDigest } : {}) },
+        payload: { update, ...(invitationDigest ? { invitationDigest } : {}) },
       }).onConflictDoNothing();
     }
   });
@@ -90,6 +99,7 @@ export async function processOneUpdate(
       let actor = await findActor(db, baleUserId, chatId);
       let reply: string;
       let direct = false;
+      let buttons: BaleButton[][] | undefined;
       if (stored.invitationDigest && !actor) {
         const success = await redeemInvitationDigest(db, stored.invitationDigest, baleUserId, chatId);
         actor = await findActor(db, baleUserId, chatId);
@@ -99,24 +109,92 @@ export async function processOneUpdate(
           message, inviteCodeSecret, operationId: updateOperationId(botInstanceKey, item.updateId) });
         reply = result.text;
         direct = result.direct === true;
+        if (result.buttons) buttons = await createMenuButtons(db, actor, result.buttons);
+        else await invalidateMenuButtons(db, actor);
       } else {
         reply = "به مشق‌بان خوش آمدید. کد دعوت شخصی خود را وارد کنید.";
       }
       if (direct) {
         // Invitation plaintext must not enter the durable inbox/outbox or logs.
-        try { await bale.sendText(chatId, reply); } catch { /* Teacher may issue a new code. */ }
+        try {
+          await bale.sendText(chatId, reply);
+        } catch {
+          await db.insert(outboxMessages).values({
+            recipientUserId: userId, teacherId: actor?.teacherId, kind: "bot_reply",
+            idempotencyKey: `update:${botInstanceKey}:${item.updateId}:secret_error`,
+            payload: { text: "ارسال کد دعوت تأیید نشد. برای اطمینان کد تازه‌ای صادر کنید." },
+          }).onConflictDoNothing();
+        }
       } else {
         await db.insert(outboxMessages).values({
-          recipientUserId: userId, kind: "bot_reply",
+          recipientUserId: userId, teacherId: actor?.teacherId, kind: "bot_reply",
           idempotencyKey: `update:${botInstanceKey}:${item.updateId}:reply`,
-          payload: { text: reply },
+          payload: { text: reply, ...(buttons ? { buttons } : {}) },
         }).onConflictDoNothing();
+      }
+    }
+    const callback = stored.update.callback_query;
+    if (callback) {
+      try { await bale.answerCallback(callback.id); } catch { /* The menu response still proceeds. */ }
+      let chat = callback.message?.chat;
+      if (!chat) {
+        const [knownUser] = await db.select({ privateChatId: users.privateChatId }).from(users)
+          .where(eq(users.baleUserId, BigInt(callback.from.id))).limit(1);
+        const knownChatId = Number(knownUser?.privateChatId);
+        if (knownUser?.privateChatId && Number.isSafeInteger(knownChatId)) {
+          chat = { id: knownChatId, type: "private" };
+        }
+      }
+      if (chat?.type === "private") {
+        const baleUserId = String(callback.from.id);
+        const chatId = String(chat.id);
+        const userId = await touchPrivateUser(db, baleUserId, chatId);
+        const actor = await findActor(db, baleUserId, chatId);
+        const command = actor && callback.data ? await consumeMenuButton(db, actor, callback.data) : null;
+        const result = actor && command
+          ? await handleAuthorizedMessage({ db, bale, storage, actor, userId, inviteCodeSecret,
+            operationId: updateOperationId(botInstanceKey, item.updateId),
+            message: { message_id: 0, from: { id: callback.from.id }, chat, text: command },
+          })
+          : { text: "این منو قدیمی است. لطفاً /start را بفرستید." };
+        const buttons = actor && result.buttons ? await createMenuButtons(db, actor, result.buttons) : undefined;
+        if (actor && !result.buttons) await invalidateMenuButtons(db, actor);
+        if ("direct" in result && result.direct === true) {
+          try {
+            await bale.sendText(chatId, result.text);
+          } catch {
+            await db.insert(outboxMessages).values({
+              recipientUserId: userId, teacherId: actor?.teacherId, kind: "bot_reply",
+              idempotencyKey: `update:${botInstanceKey}:${item.updateId}:secret_error`,
+              payload: { text: "ارسال کد دعوت تأیید نشد. برای اطمینان کد تازه‌ای صادر کنید." },
+            }).onConflictDoNothing();
+          }
+        } else {
+          await db.insert(outboxMessages).values({
+            recipientUserId: userId, teacherId: actor?.teacherId, kind: "bot_reply",
+            idempotencyKey: `update:${botInstanceKey}:${item.updateId}:callback`,
+            payload: { text: result.text, ...(buttons ? { buttons } : {}),
+              ...(callback.message?.message_id === undefined ? {} : { editMessageId: callback.message.message_id }) },
+          }).onConflictDoNothing();
+        }
       }
     }
     await db.update(processedUpdates).set({ status: "processed", processedAt: new Date(),
       leaseUntil: null, payload: { updateId: stored.update.update_id } })
       .where(and(eq(processedUpdates.botInstanceKey, botInstanceKey), eq(processedUpdates.updateId, item.updateId)));
   } catch {
+    if (item.attempts >= 5) {
+      let message: BaleUpdate["message"];
+      try { message = storedUpdate(item.payload).update.message; } catch { /* Corrupt payload has no safe recipient. */ }
+      if (message?.chat.type === "private" && message.from) {
+        const userId = await touchPrivateUser(db, String(message.from.id), String(message.chat.id));
+        await db.insert(outboxMessages).values({
+          recipientUserId: userId, kind: "bot_reply",
+          idempotencyKey: `update:${botInstanceKey}:${item.updateId}:error`,
+          payload: { text: "عملیات انجام نشد. لطفاً دوباره تلاش کنید یا /start را بفرستید." },
+        }).onConflictDoNothing();
+      }
+    }
     await db.update(processedUpdates).set({ status: item.attempts >= 5 ? "failed" : "pending",
       leaseUntil: null, lastError: "processing_failed" })
       .where(and(eq(processedUpdates.botInstanceKey, botInstanceKey), eq(processedUpdates.updateId, item.updateId)));

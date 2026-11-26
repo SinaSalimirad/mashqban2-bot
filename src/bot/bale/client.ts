@@ -10,7 +10,11 @@ export type BaleMessage = {
 export type BaleUpdate = {
   update_id: number;
   message?: BaleMessage;
+  callback_query?: { id: string; from: { id: number }; data?: string;
+    message?: { message_id?: number; chat: { id: number; type: string } } };
 };
+
+export type BaleButton = { text: string; callback_data: string; style?: "primary" | "success" | "danger" };
 
 export class BaleApiError extends Error {
   constructor(public readonly code: number | null, public readonly retryAfter: number | null) {
@@ -28,6 +32,13 @@ function object(value: unknown): Record<string, unknown> {
 function safeId(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new Error("Unsupported Bale identifier");
+  }
+  return value;
+}
+
+function safeChatId(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value === 0) {
+    throw new Error("Unsupported Bale chat identifier");
   }
   return value;
 }
@@ -71,6 +82,21 @@ function parseMedia(message: Record<string, unknown>): BaleMessage["media"] {
 export function parseUpdate(value: unknown): BaleUpdate {
   const update = object(value);
   const updateId = safeId(update.update_id);
+  if (update.callback_query !== undefined) {
+    const callback = object(update.callback_query);
+    const from = object(callback.from);
+    const message = callback.message === undefined ? undefined : object(callback.message);
+    const chat = message ? object(message.chat) : undefined;
+    if (typeof callback.id !== "string" || !callback.id) throw new Error("Invalid Bale callback");
+    return { update_id: updateId, callback_query: {
+      id: callback.id, from: { id: safeId(from.id) },
+      ...(typeof callback.data === "string" ? { data: callback.data } : {}),
+      ...(chat ? { message: {
+        chat: { id: safeChatId(chat.id), type: String(chat.type) },
+        ...(message?.message_id === undefined ? {} : { message_id: safeId(message.message_id) }),
+      } } : {}),
+    } };
+  }
   if (update.message === undefined) return { update_id: updateId };
   const message = object(update.message);
   const chat = object(message.chat);
@@ -80,7 +106,7 @@ export function parseUpdate(value: unknown): BaleUpdate {
     update_id: updateId,
     message: {
       message_id: safeId(message.message_id),
-      chat: { id: safeId(chat.id), type: String(chat.type) },
+      chat: { id: safeChatId(chat.id), type: String(chat.type) },
       ...(from ? { from: { id: safeId(from.id) } } : {}),
       ...(typeof message.text === "string" ? { text: message.text } : {}),
       ...(media ? { media } : {}),
@@ -125,18 +151,44 @@ export class BaleClient {
     return result.map(parseUpdate);
   }
 
-  async sendText(chatId: string, message: string): Promise<string> {
-    const result = object(await this.call("sendMessage", { chat_id: chatId, text: message }, 15_000));
+  async sendText(chatId: string, message: string,
+    buttons?: BaleButton[][]): Promise<string> {
+    const text = message.length > 4000 ? `${message.slice(0, 3970)}\n… متن طولانی بود؛ از صفحه‌بندی استفاده کنید.` : message;
+    const result = object(await this.call("sendMessage", { chat_id: chatId, text,
+      ...(buttons ? { reply_markup: { inline_keyboard: buttons } } : {}),
+    }, 15_000));
     return String(safeId(result.message_id));
   }
 
+  async editText(chatId: string, messageId: number, message: string,
+    buttons?: BaleButton[][]): Promise<string> {
+    const text = message.length > 4000 ? `${message.slice(0, 3970)}\n… متن طولانی بود؛ از صفحه‌بندی استفاده کنید.` : message;
+    const result = object(await this.call("editMessageText", {
+      chat_id: chatId, message_id: messageId, text,
+      reply_markup: { inline_keyboard: buttons ?? [] },
+    }, 15_000));
+    return String(safeId(result.message_id));
+  }
+
+  async answerCallback(callbackId: string): Promise<void> {
+    if (callbackId.startsWith("1")) return;
+    await this.call("answerCallbackQuery", { callback_query_id: callbackId }, 5_000);
+  }
+
   async sendVoice(chatId: string, audio: Uint8Array): Promise<string> {
+    return this.sendMedia(chatId, "voice", audio, "audio/ogg");
+  }
+
+  async sendMedia(chatId: string, kind: "photo" | "document" | "video" | "voice" | "audio",
+    bytes: Uint8Array, mimeType: string): Promise<string> {
+    const method = { photo: "sendPhoto", document: "sendDocument", video: "sendVideo",
+      voice: "sendVoice", audio: "sendAudio" }[kind];
     const form = new FormData();
     form.set("chat_id", chatId);
-    form.set("voice", new Blob([new Uint8Array(audio)], { type: "audio/ogg" }), "feedback.ogg");
+    form.set(kind, new Blob([new Uint8Array(bytes)], { type: mimeType }), `mashqban-${kind}`);
     let response: Response;
     try {
-      response = await this.fetcher(`https://tapi.bale.ai/bot${this.token}/sendVoice`, {
+      response = await this.fetcher(`https://tapi.bale.ai/bot${this.token}/${method}`, {
         method: "POST", body: form, signal: AbortSignal.timeout(30_000),
       });
     } catch {

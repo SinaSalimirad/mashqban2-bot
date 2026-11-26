@@ -343,8 +343,8 @@ MVP proposal: one active session per account/chat with `revision` and operation 
 | Feedback delivery failure | “Feedback was saved, but delivery to Bale has not succeeded yet.” | Record status in history; controlled retry |
 | No results | “There is nothing to display.” | Back button |
 
-## 13. Preparation before implementing the UX
+## 13. Implementation status
 
-- Verify buttons, payload limits, message editing, voice delivery, File IDs, media groups, and text limits against the actual Bale API.
-- Test PRD AC-01 through AC-16 with a fake adapter and a test bot; do not use real student information in tests.
-- Review Persian examples on Bale mobile, numeric/date ordering, readability, and cancellation flows. This document is neither an executable mockup nor UI code.
+The [Bale API review](BALE_API_SPIKE.md) confirms inline buttons, callbacks, message editing, text and voice/file methods in the official documentation. The bot now has role-specific private menus, server-scoped one-use callback tokens, message editing with a send-new-message fallback, guided creation and confirmation flows, searchable and paginated roster screens, homework draft review, feedback entry, and report navigation. Text commands remain available as an alternative to buttons.
+
+The UX still needs a live test bot and review on Bale mobile before real student use. The current flow does not offer a button for every operation in this proposal: roster renaming, arbitrary historical date selection, and some back paths still use text commands. Incoming media-group items are handled as individual files because the documented API has no album-complete event. No automated tests have been added yet, following the project owner's current instruction.
