@@ -5,6 +5,9 @@
   "scripts": {
     "typecheck": "bun check",
     "test": "bun test --check",
+    "test:unit": "bun test --check tests/calendar.test.ts tests/config.test.ts tests/bale-client.test.ts tests/storage.test.ts tests/retention.test.ts",
+    "test:integration": "bun run scripts/test-integration.ts",
+    "test:all": "bun run test:unit && bun run test:integration",
     "check:config": "bun run src/check-config.ts",
     "start": "bun run src/index.ts",
     "ops:outbox": "bun run src/operator.ts",

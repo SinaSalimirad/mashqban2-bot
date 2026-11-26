@@ -24,7 +24,10 @@ export async function authoritativeTime(tx: Parameters<Parameters<Database["tran
   return instant;
 }
 
-export async function saveHomework(db: Database, actor: Actor, input: SaveInput): Promise<string> {
+export type AuthoritativeClock = typeof authoritativeTime;
+
+export async function saveHomework(db: Database, actor: Actor, input: SaveInput,
+  clock: AuthoritativeClock = authoritativeTime): Promise<string> {
   if (actor.role !== "student") throw new Error("Forbidden");
   const title = input.title.trim();
   if (!title || title.length > 120) throw new Error("Invalid homework title");
@@ -80,7 +83,7 @@ export async function saveHomework(db: Database, actor: Actor, input: SaveInput)
       throw new Error("File unavailable");
     }
 
-    const instant = await authoritativeTime(tx);
+    const instant = await clock(tx);
     const schoolDate = getTehranTime(instant).schoolDate;
     if (!isHomeworkWindowOpen(instant) || membership.joinedAt > instant) throw new Error("Homework window closed");
     if (existing && existing.schoolDate !== schoolDate) throw new Error("Cannot edit an earlier day");
@@ -115,6 +118,7 @@ export async function saveHomework(db: Database, actor: Actor, input: SaveInput)
 
 export async function deleteHomework(
   db: Database, actor: Actor, homeworkId: string, expectedVersionId: string, operationId: string,
+  clock: AuthoritativeClock = authoritativeTime,
 ): Promise<void> {
   if (actor.role === "assistant") throw new Error("Forbidden");
   await db.transaction(async (tx) => {
@@ -147,7 +151,7 @@ export async function deleteHomework(
     const [current] = await tx.select().from(homeworkVersions)
       .where(eq(homeworkVersions.id, homework.currentVersionId)).limit(1);
     if (!current) throw new Error("Homework version missing");
-    const instant = await authoritativeTime(tx);
+    const instant = await clock(tx);
     if (actor.role === "student") {
       if (!isHomeworkWindowOpen(instant) || getTehranTime(instant).schoolDate !== homework.schoolDate) {
         throw new Error("Homework window closed");

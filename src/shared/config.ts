@@ -34,11 +34,16 @@ export function readConfig(env: Record<string, string | undefined>): AppConfig {
     throw new Error("TEACHER_BALE_ID must be a positive integer string");
   }
 
+  const inviteCodeSecret = required("INVITE_CODE_SECRET");
+  if (new TextEncoder().encode(inviteCodeSecret).byteLength < 32) {
+    throw new Error("INVITE_CODE_SECRET must be at least 32 bytes");
+  }
+
   return {
     databaseUrl,
     baleBotToken: required("BALE_BOT_TOKEN"),
     teacherBaleId,
     botInstanceKey: required("BOT_INSTANCE_KEY"),
-    inviteCodeSecret: required("INVITE_CODE_SECRET"),
+    inviteCodeSecret,
   };
 }

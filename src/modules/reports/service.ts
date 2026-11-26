@@ -6,6 +6,7 @@ import {
 } from "../../database/schema.ts";
 import { getPeriodBounds, getTehranHourInstant, getTehranTime } from "../../shared/calendar.ts";
 import { authoritativeTime } from "../homeworks/service.ts";
+import type { AuthoritativeClock } from "../homeworks/service.ts";
 import type { Actor } from "../auth/service.ts";
 
 type ReportRow = {
@@ -18,7 +19,8 @@ type ReportRow = {
   had_deleted: boolean;
 };
 
-export async function closeSchoolDay(db: Database, teacherId: string, schoolDate: string): Promise<string> {
+export async function closeSchoolDay(db: Database, teacherId: string, schoolDate: string,
+  clock: AuthoritativeClock = authoritativeTime): Promise<string> {
   const windowStart = getTehranHourInstant(schoolDate, 14);
   const windowEnd = getTehranHourInstant(schoolDate, 22);
   return db.transaction(async (tx) => {
@@ -26,7 +28,7 @@ export async function closeSchoolDay(db: Database, teacherId: string, schoolDate
     if (ownerLock.length !== 1) throw new Error("Teacher unavailable");
     const [teacher] = await tx.select().from(teachers).where(eq(teachers.id, teacherId)).limit(1);
     if (!teacher || teacher.createdAt >= windowEnd) throw new Error("Day predates teacher activation");
-    if (await authoritativeTime(tx) < windowEnd) throw new Error("School day is still open");
+    if (await clock(tx) < windowEnd) throw new Error("School day is still open");
     const [existing] = await tx.select({ id: dailyReports.id }).from(dailyReports)
       .where(and(eq(dailyReports.teacherId, teacherId), eq(dailyReports.schoolDate, schoolDate))).limit(1);
     if (existing) return existing.id;

@@ -15,6 +15,7 @@ export type BaleUpdate = {
 };
 
 export type BaleButton = { text: string; callback_data: string; style?: "primary" | "success" | "danger" };
+export type BaleFetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export class BaleApiError extends Error {
   constructor(public readonly code: number | null, public readonly retryAfter: number | null) {
@@ -41,6 +42,11 @@ function safeChatId(value: unknown): number {
     throw new Error("Unsupported Bale chat identifier");
   }
   return value;
+}
+
+function messageText(value: string): string {
+  const suffix = "\n… متن طولانی بود؛ از صفحه‌بندی استفاده کنید.";
+  return value.length > 4000 ? `${value.slice(0, 4000 - suffix.length)}${suffix}` : value;
 }
 
 function parseMedia(message: Record<string, unknown>): BaleMessage["media"] {
@@ -115,7 +121,7 @@ export function parseUpdate(value: unknown): BaleUpdate {
 }
 
 export class BaleClient {
-  constructor(private readonly token: string, private readonly fetcher: typeof fetch = fetch) {}
+  constructor(private readonly token: string, private readonly fetcher: BaleFetcher = fetch) {}
 
   private async call(method: string, body: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
     let response: Response;
@@ -153,7 +159,7 @@ export class BaleClient {
 
   async sendText(chatId: string, message: string,
     buttons?: BaleButton[][]): Promise<string> {
-    const text = message.length > 4000 ? `${message.slice(0, 3970)}\n… متن طولانی بود؛ از صفحه‌بندی استفاده کنید.` : message;
+    const text = messageText(message);
     const result = object(await this.call("sendMessage", { chat_id: chatId, text,
       ...(buttons ? { reply_markup: { inline_keyboard: buttons } } : {}),
     }, 15_000));
@@ -162,7 +168,7 @@ export class BaleClient {
 
   async editText(chatId: string, messageId: number, message: string,
     buttons?: BaleButton[][]): Promise<string> {
-    const text = message.length > 4000 ? `${message.slice(0, 3970)}\n… متن طولانی بود؛ از صفحه‌بندی استفاده کنید.` : message;
+    const text = messageText(message);
     const result = object(await this.call("editMessageText", {
       chat_id: chatId, message_id: messageId, text,
       reply_markup: { inline_keyboard: buttons ?? [] },
