@@ -14,7 +14,7 @@ This document is intended for the developer and Codex; it does not imply that co
 | Packaging | Agreed | Docker + Docker Compose |
 | Architecture | MVP proposal | Modular monolith, one application service and one DB |
 | HTTP framework | Conditional | ElysiaJS if Webhooks or HTTP endpoints are needed; native Bun is also an option |
-| Reverse proxy | Owner request | Nginx in front of the backend health endpoints; polling remains the bot transport |
+| Reverse proxy | Not used | The app exposes localhost-only health endpoints; Bale uses outbound HTTPS Long Polling |
 | Update delivery | Initial choice | Long Polling for a single instance; test-bot verification pending |
 | File storage | Owner decision | Private server storage for homework and feedback files |
 | API client | MVP proposal | Lightweight custom fetch adapter; do not assume full Telegram compatibility |
@@ -29,9 +29,6 @@ One teacher and 100 students do not justify microservices, Kubernetes, an event 
 flowchart TD
   U[Teacher / Assistant / Student] <--> B[Bale Messenger API]
   B <-->|Long polling option| A[Bun Application]
-  B -->|Webhook option| N[Nginx HTTPS]
-  N --> H[HTTP ingress / Elysia optional]
-  H --> A
   A --> I[Durable update inbox]
   I --> R[Router + Session + Auth/RBAC]
   R --> D[Domain modules]
@@ -90,7 +87,6 @@ mashqban/
 │   └── shared/                   # clock/calendar, errors, logging, ids
 ├── drizzle/                     # committed migrations
 ├── tests/                       # unit, integration, contract, e2e
-├── nginx/                       # only if selected
 ├── .env.example
 ├── .gitignore
 ├── Dockerfile
@@ -163,11 +159,11 @@ For every area, record at least a sanitized request/response example or test res
 
 ### 5.1 Transport selection
 
-**Long Polling:** Simpler for the MVP if the API supports it reliably, offsets are dependable, and the server has one instance. It requires no public endpoint, Nginx, or Elysia. Advance offsets only after durably saving updates, not before inbox insertion. Prevent two consumers from receiving for the same bot concurrently.
+**Long Polling:** Simpler for the MVP if the API supports it reliably, offsets are dependable, and the server has one instance. It requires no public endpoint or HTTP framework. Advance offsets only after durably saving updates, not before inbox insertion. Prevent two consumers from receiving for the same bot concurrently.
 
-**Webhook:** If supported by the API and deployment: use TLS, a secret path, official source verification where supported, Nginx, a lightweight HTTP handler, body limits, and rate limits. A secret path alone does not replace strong authentication. Acknowledge success only after durable inbox persistence; on DB errors return the response required by Bale's retry contract. Do not upload or perform long processing inside the request handler.
+**Webhook:** If supported by the API and deployment: use TLS, a secret path, official source verification where supported, a lightweight HTTP handler, body limits, and rate limits. A secret path alone does not replace strong authentication. Acknowledge success only after durable inbox persistence; on DB errors return the response required by Bale's retry contract. Do not upload or perform long processing inside the request handler.
 
-Record the decision based on the spike and deployment environment. Add Elysia/Nginx only when needed.
+Record the decision based on the spike and deployment environment. Add an HTTP framework only when needed.
 
 ## 6. Update processing and durability
 
@@ -251,7 +247,7 @@ LOG_LEVEL=info
 
 - `app`: verified/pinned Bun version, dependency lockfile, reproducible build, non-root execution where possible, graceful shutdown. Expose only necessary HTTP-mode ports.
 - `db`: pinned PostgreSQL, durable volume, healthcheck, internal network; no public production DB port.
-- `nginx` is included at the owner's request. With polling it exposes only `/health` and `/ready` on a localhost-bound host port; no public application API is exposed. Configure TLS at the deployment edge before allowing remote access. If transport changes to Webhook, review source authentication and request limits first.
+- `app` publishes `/health` and `/ready` on a localhost-bound host port; no public application API is exposed. Bale traffic is outbound HTTPS Long Polling. If transport changes to Webhook, review TLS, source authentication, and request limits first.
 - Define file/secret/backend volumes after the storage decision; do not keep persistent data in ephemeral container layers.
 - Run migrations once per release before app startup with backup/rollback plans. No production `drizzle-kit push` or automatic schema resets. Commit lockfiles and migrations.
 - Health/readiness through HTTP where applicable or an internal command. Readiness checks DB connectivity/schema compatibility, not repeated Bale API calls. Configure restart policy and SIGTERM handling: stop new claims, finish current transactions, release leases or recover after expiry.
@@ -305,4 +301,4 @@ For each phase: small reviewable changes, relevant tests, typecheck, and recorde
 
 The MVP is ready for release when all PRD acceptance criteria pass or explicit owner exceptions are recorded; file types, limits, and durability on Bale/the chosen backend are tested; negative tests verify assistant/student authorization; actual daily/weekly/monthly reports and 22:00 notifications work on a test bot; migrations, backup/restore, and deployment are documented; Git contains no real secrets; retention policy is defined; and no release-critical open decision remains unresolved.
 
-Long Polling is the single-instance transport, private server storage is the owner-selected file backend, and Nginx routes health endpoints at the owner's request. Automated file retention is implemented; a live Bale test bot, full media validation, and production backup/restore are still required before release. Synchronize changes to proposed technical details with PRD and the other documents.
+Long Polling is the single-instance transport, private server storage is the owner-selected file backend, and the app serves health endpoints directly on localhost. Automated file retention is implemented; a live Bale test bot, full media validation, and production backup/restore are still required before release. Synchronize changes to proposed technical details with PRD and the other documents.

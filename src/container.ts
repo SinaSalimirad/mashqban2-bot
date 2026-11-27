@@ -11,6 +11,7 @@ switch (task) {
     await import("./migrate.ts");
     break;
   case "app":
+    await import("./migrate.ts");
     await import("./index.ts");
     break;
   case "outbox":

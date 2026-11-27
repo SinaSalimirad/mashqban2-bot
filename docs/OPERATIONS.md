@@ -10,19 +10,19 @@ Before the first start, review SQL under `drizzle/`, confirm the two published p
 docker compose config --quiet
 docker compose build --pull
 docker compose run --rm --no-deps app bun run src/container.ts check
-docker compose up -d
+docker compose up -d --remove-orphans
 docker compose ps
 curl --fail --silent http://127.0.0.1:${HTTP_PORT:-8080}/health
 curl --fail --silent http://127.0.0.1:${HTTP_PORT:-8080}/ready
 ```
 
-The one-shot `migrate` service applies pending migrations before the backend starts. The runtime image contains production dependencies only; migrations use the runtime Drizzle migrator rather than development tooling. The backend polls Bale, so it does not need a public webhook. Nginx exposes only local `/health` and `/ready`; keep PostgreSQL local as configured. If remote health access is needed, put an authenticated TLS reverse proxy or private monitoring network at the deployment edge rather than publishing the service directly.
+The app applies pending migrations before starting the bot; migration errors appear in `docker compose logs app`. This avoids a `podman-compose` wait loop when a one-shot migration service fails. The runtime image contains production dependencies only; migrations use the runtime Drizzle migrator rather than development tooling. The backend connects directly to `tapi.bale.ai` over outbound HTTPS and polls for updates, so it needs no public webhook or Nginx. The app serves only `/health` and `/ready` on the localhost-bound `HTTP_PORT`; keep PostgreSQL local as configured. If remote health access is needed, use a private monitoring network or a separately managed authenticated TLS endpoint.
 
 `/health` confirms that the process can answer HTTP. `/ready` additionally checks the database and the bot-loop heartbeat; it becomes unavailable when shutdown starts or the loop has not completed useful work for 90 seconds. Alert on repeated container restarts, `/ready` failures longer than two minutes, PostgreSQL disk usage, and backup age. Container logs rotate at five 10 MB files per service, so forward logs externally if longer retention is required.
 
 ## Release and rollback
 
-Before every production update, run the full CI suite, read new migration SQL, create and verify a backup, and record the currently deployed Git commit and image ID. Then pull the intended commit and run `docker compose up -d --build`. Confirm `docker compose ps`, `/ready`, recent logs, and one synthetic Bale interaction.
+Before every production update, run the full CI suite, read new migration SQL, create and verify a backup, and record the currently deployed Git commit and image ID. Then pull the intended commit and run `docker compose up -d --build --remove-orphans`. Confirm `docker compose ps`, `/ready`, recent logs, and one synthetic Bale interaction.
 
 Application rollback is `git checkout` of the previously recorded commit followed by `docker compose up -d --build`, provided its code is compatible with the already-applied schema. Database migrations in this repository are forward-only. If a migration is incompatible, restoring the paired pre-release database and file backup is a destructive recovery operation and must be rehearsed on an isolated host first. Never improvise a production schema rollback.
 
@@ -49,7 +49,7 @@ Do not enroll real students until all of these have been observed with a test bo
 - Daily report closure after 22:00 Tehran and restart recovery for inbox/outbox work.
 - Backup verification and a full isolated restore of both PostgreSQL and private files.
 - Host reboot with automatic container recovery and no duplicate polling instance.
-- TLS/private monitoring access, disk alerts, backup alerts, and documented operator access.
+- Private monitoring access, disk alerts, backup alerts, and documented operator access.
 
 ## Delivery uncertainty
 

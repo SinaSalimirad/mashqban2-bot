@@ -1,12 +1,12 @@
 # Mashqban
 
-Mashqban is a Persian-language Bale Messenger bot for collecting daily homework, managing classes, providing feedback, and reporting student participation. It runs as a Bun backend with PostgreSQL, private server file storage, and Nginx health routing. Bale communication uses Long Polling; there is no public web panel or webhook.
+Mashqban is a Persian-language Bale Messenger bot for collecting daily homework, managing classes, providing feedback, and reporting student participation. It runs as a Bun backend with PostgreSQL and private server file storage. The backend connects directly to the Bale API over outbound HTTPS using Long Polling; there is no public web panel or webhook.
 
 ## Development
 
 Use Bun 1.4.x. Run `bun install` and `bun run typecheck`. Copy `.env.example` to `.env` and replace all placeholders. `bun run check:config` validates the host-run configuration without printing secrets.
 
-For a container deployment, set `POSTGRES_PASSWORD`, `BALE_BOT_TOKEN`, `TEACHER_BALE_ID`, and a 32-byte-or-longer `INVITE_CODE_SECRET` in `.env`, then follow the production checklist in [operations](docs/OPERATIONS.md). Compose starts PostgreSQL, applies migrations, starts the hardened Bun backend as a non-root user, and exposes `/health` and `/ready` through Nginx at `http://127.0.0.1:8080` (or `HTTP_PORT`). The backend builds the internal PostgreSQL URL from `POSTGRES_PASSWORD`, so reserved URL characters in the password are encoded correctly. The published Nginx and PostgreSQL ports bind only to localhost. Add TLS at the deployment edge before remote access. Named volumes hold the database and private files; back up both together.
+For a container deployment, set `POSTGRES_PASSWORD`, `BALE_BOT_TOKEN`, `TEACHER_BALE_ID`, and a 32-byte-or-longer `INVITE_CODE_SECRET` in `.env`, then follow the production checklist in [operations](docs/OPERATIONS.md). Compose starts PostgreSQL and the hardened Bun backend as a non-root user; the app applies pending migrations before polling Bale. The app exposes `/health` and `/ready` directly at `http://127.0.0.1:8080` (or `HTTP_PORT`). The backend builds the internal PostgreSQL URL from `POSTGRES_PASSWORD`, so reserved URL characters in the password are encoded correctly. The published health and PostgreSQL ports bind only to localhost. Named volumes hold the database and private files; back up both together.
 
 Private homework and voice-feedback files are purged after one year following the relevant 31 Shahrivar school-year end. The scheduled cleanup retains database history with a `purged` file status. Each file is limited to 20 MB and each homework to 20 files. Set up and verify backups before entering real student data. No live Bale bot or production backup/restore has been verified, and this release must be checked with a test bot before real use.
 
